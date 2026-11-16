@@ -4,6 +4,7 @@ set -euo pipefail
 source "$(dirname "$0")/common.sh"
 [[ ${CONFIRM_DESTROY:-} == "$STACK_NAME" ]] || { echo "Run with CONFIRM_DESTROY=$STACK_NAME to remove hosting (retains paid storage)." >&2; exit 1; }
 stack_outputs
+if [[ $AWS_REGION == us-east-2 ]]; then python3 "$AWS_DIR/edge.py" destroy "$STATE_DIR"; fi
 cp "$STATE_DIR/stack.json" "$STATE_DIR/retained-resources.json"
 aws_json cloudformation list-stack-resources --stack-name "$STACK_NAME" > "$STATE_DIR/retained-logical-resources.json"
 aws cloudformation delete-stack --stack-name "$STACK_NAME"

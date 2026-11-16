@@ -23,7 +23,7 @@ def load(name):
 
 class InfrastructureTests(unittest.TestCase):
     def test_cost_and_data_invariants(self):
-        template = load("template").template()
+        template = load("template").template("us-east-1")
         resources = template["Resources"]
         self.assertEqual(sum(r["Type"] == "AWS::EC2::Instance" for r in resources.values()), 1)
         self.assertFalse(any(any(x in r["Type"] for x in ("NATGateway", "DBInstance", "LoadBalancer", "ECR::Repository")) for r in resources.values()))
@@ -41,6 +41,13 @@ class InfrastructureTests(unittest.TestCase):
         self.assertEqual(distribution["DefaultCacheBehavior"]["CachePolicyId"], "4135ea2d-6df8-44a3-9df3-4b5a84be39ad")
         self.assertLess(len(json.dumps(template).encode()), 51200)
 
+    def test_regional_template_has_no_global_edge_or_secret(self):
+        template = load("template").template("us-east-2")
+        self.assertFalse(any(r['Type'].startswith(('AWS::WAF', 'AWS::CloudFront', 'AWS::PricingPlan')) for r in template['Resources'].values()))
+        self.assertNotIn('OriginToken', template['Parameters'])
+        self.assertNotIn('Conditions', template)
+        self.assertIn('OriginDomainName', template['Outputs'])
+
     def test_trial_expiry_changes_new_instance_default(self):
         manage = load("manage")
         with patch.dict(os.environ, {"INSTANCE_TYPE": ""}):
@@ -48,7 +55,7 @@ class InfrastructureTests(unittest.TestCase):
             self.assertEqual(manage.instance_type(dt.date(2027,1,1)), "t4g.micro")
 
 
-class CliLifecycleTests(unittest.TestCase):
+class CliTestCase(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -74,6 +81,8 @@ class CliLifecycleTests(unittest.TestCase):
         path = self.fake / "calls.jsonl"
         return [json.loads(s) for s in path.read_text().splitlines()] if path.exists() else []
 
+
+class CliLifecycleTests(CliTestCase):
     def test_expired_coverage_fails_before_mutation(self):
         self.run_script("create.sh", expected=1, FAKE_PLAN_STATUS="EXPIRED")
         self.assertFalse(any(c[1:3] in (["cloudformation","deploy"], ["ssm","put-parameter"]) for c in self.calls()))
@@ -142,6 +151,76 @@ class CliLifecycleTests(unittest.TestCase):
         self.assertFalse(any(c[1:3] == ["ec2", "delete-volume"] for c in self.calls()))
         self.run_script("purge-data.sh", CONFIRM_PURGE="poketeam:123456789012")
         self.assertTrue(any(c[1:3] == ["ec2", "delete-volume"] for c in self.calls()))
+
+
+class ProjectLifecycleTests(CliTestCase):
+    def setUp(self):
+        super().setUp()
+        self.env['AWS_REGION'] = 'us-east-2'
+
+    def test_create_is_repeatable_and_preserves_token(self):
+        self.run_script('create.sh')
+        state = self.aws / '.state/123456789012/us-east-2/poketeam'
+        config = json.loads((self.fake / 'distribution.json').read_text())
+        self.assertFalse(config['Enabled'])
+        self.assertTrue(config['IsIPV6Enabled'])
+        self.assertEqual(config['DefaultCacheBehavior']['AllowedMethods']['CachedMethods']['Items'], ['GET', 'HEAD'])
+        self.assertEqual(config['Origins']['Items'][0]['CustomHeaders']['Quantity'], 1)
+        self.assertNotIn('OriginToken=', (state / 'parameters.json').read_text())
+        token = (self.fake / 'token.json').read_text()
+        # Recover even when the last response was lost before private IDs were saved.
+        (state / 'edge.json').unlink()
+        self.run_script('create.sh')
+        self.assertEqual(token, (self.fake / 'token.json').read_text())
+        for command in (['cloudformation', 'deploy'], ['cloudfront', 'create-distribution-with-tags']):
+            self.assertEqual(sum(c[1:3] == command for c in self.calls()), 1)
+        self.assertFalse(any(c[1] == 'cloudformation' and 'us-east-1' in c for c in self.calls()))
+        self.assertTrue(all(c[c.index('--region') + 1] == 'us-east-1' for c in self.calls() if c[1] in ('wafv2', 'cloudfront') and '--generate-cli-skeleton' not in c))
+
+    def test_backend_deploy_preserves_noecho_and_builds_arm(self):
+        self.run_script('create.sh')
+        self.run_script('deploy-backend.sh')
+        config = json.loads((self.fake / 'distribution.json').read_text())
+        self.assertTrue(config['Enabled'])
+        self.assertEqual(config['Origins']['Items'][0]['DomainName'], 'ec2-203-0-113-1.compute-1.amazonaws.com')
+        self.assertTrue(any(c[0] == 'docker' and 'linux/arm64' in c for c in self.calls()))
+        token = json.loads((self.fake / 'token.json').read_text())['Value']
+        self.assertNotIn(token, json.dumps(self.calls()))
+        self.assertNotIn(token, (self.fake / 'remote.json').read_text())
+        self.assertEqual(sum(c[1:3] == ['cloudformation', 'deploy'] for c in self.calls()), 1)
+
+    def test_standard_pricing_never_calls_subscription_or_waf_apis(self):
+        self.run_script('create.sh', FAKE_SUBSCRIPTION_DENIED='1')
+        self.run_script('deploy-backend.sh', FAKE_SUBSCRIPTION_DENIED='1')
+        self.assertFalse(any(c[1] in ('wafv2', 'pricing-plan-manager') for c in self.calls()))
+        self.assertEqual(json.loads((self.fake / 'distribution.json').read_text())['WebACLId'], '')
+
+    def test_existing_subscription_state_requires_explicit_review(self):
+        self.run_script('create.sh')
+        state = self.aws / '.state/123456789012/us-east-2/poketeam/edge.json'
+        value = json.loads(state.read_text())
+        value['subscription_arn'] = 'existing-subscription'
+        state.write_text(json.dumps(value))
+        self.run_script('deploy-backend.sh', expected=1)
+        self.assertFalse(any(c[0] == 'docker' for c in self.calls()))
+
+    def test_attached_waf_blocks_enablement(self):
+        self.run_script('create.sh')
+        path = self.fake / 'distribution.json'
+        value = json.loads(path.read_text())
+        value['WebACLId'] = 'unexpected-waf'
+        path.write_text(json.dumps(value))
+        self.run_script('deploy-backend.sh', expected=1)
+        self.assertFalse(json.loads(path.read_text())['Enabled'])
+
+    def test_frontend_and_data_teardown_guards(self):
+        self.run_script('create.sh')
+        self.run_script('deploy-backend.sh')
+        self.run_script('destroy.sh', expected=1)
+        self.run_script('destroy.sh', CONFIRM_DESTROY='poketeam')
+        self.assertFalse((self.fake / 'distribution.json').exists())
+        self.assertFalse(any(c[1] in ('wafv2', 'pricing-plan-manager') for c in self.calls()))
+        self.assertFalse(any(c[1:3] == ['ec2', 'delete-volume'] for c in self.calls()))
 
 
 if __name__ == "__main__":

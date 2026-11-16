@@ -27,7 +27,7 @@ def preflight(identity, plan, state):
     if choice not in ("t4g.micro", "t4g.small"):
         raise ValueError("INSTANCE_TYPE must be t4g.micro or t4g.small (ARM64).")
     credits = plan.get("accountPlanRemainingCredits", {}).get("amount", 0)
-    print(f"Account: {identity['Account']} | Region: us-east-1 | Instance: {choice}")
+    print(f"Account: {identity['Account']} | Region: {os.environ.get('AWS_REGION', 'us-east-1')} | Instance: {choice}")
     print(f"Free Tier plan: {plan.get('accountPlanType', 'unknown')} / {plan.get('accountPlanStatus', 'unknown')}")
     print(f"Remaining shared credits: ${credits}; expires: {plan.get('accountPlanExpirationDate', 'unknown')}")
     print("t4g.small's 750-hour/month trial is documented through 2026-12-31; existing usage shares that allowance.")
@@ -60,6 +60,9 @@ def parameters(state, enabled):
         "RootGiB": os.environ.get("ROOT_GIB", "16"),
         "DataGiB": os.environ.get("DATA_GIB", "8"),
     }
+    if os.environ.get("AWS_REGION") == "us-east-2":
+        for key in ("OriginToken", "EnableTraffic"):
+            del values[key]
     for key in ("RootGiB", "DataGiB"):
         if not 8 <= int(values[key]) <= 30:
             raise ValueError(f"{key} must be 8–30 GiB.")
@@ -70,7 +73,7 @@ def deploy_command(path, bucket, release, stack):
     # Values come from AWS outputs/generated identifiers, but still quote every shell argument.
     script = f"""#!/bin/bash
 set -euo pipefail
-cloud-init status --wait
+cloud-init status --wait || [[ -f /var/lib/poketeam/bootstrap-complete ]]
 mountpoint -q /srv/poketeam
 install -d -m 700 /srv/poketeam/releases/{shlex.quote(release)}
 cd /srv/poketeam/releases/{shlex.quote(release)}

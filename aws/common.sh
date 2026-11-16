@@ -8,7 +8,7 @@ export AWS_DEFAULT_REGION=$AWS_REGION
 export AWS_PAGER=""
 export AWS_CLI_AUTO_PROMPT=off
 export STACK_NAME=${STACK_NAME:-poketeam}
-[[ $AWS_REGION == us-east-1 ]] || { echo 'This initial stack supports us-east-1 (global WAF/CloudFront resources).' >&2; exit 1; }
+[[ $AWS_REGION == us-east-1 || $AWS_REGION == us-east-2 ]] || { echo 'Supported regions: us-east-1 and us-east-2.' >&2; exit 1; }
 [[ $STACK_NAME =~ ^[a-z][a-z0-9-]{0,30}$ ]] || { echo 'STACK_NAME must be lowercase, start with a letter, and be at most 31 characters.' >&2; exit 1; }
 command -v aws >/dev/null || { echo 'Install current AWS CLI v2 first; see aws/README.md.' >&2; exit 1; }
 command -v python3 >/dev/null || { echo 'python3 is required.' >&2; exit 1; }
@@ -20,6 +20,10 @@ mkdir -p "$STATE_DIR"
 aws_json() { aws "$@" --output json; }
 stack_outputs() {
     aws_json cloudformation describe-stacks --stack-name "$STACK_NAME" > "$STATE_DIR/stack.json"
+    if [[ $AWS_REGION == us-east-2 && -f "$STATE_DIR/edge.json" ]] &&
+        python3 -c 'import json,sys;sys.exit("distribution_id" not in json.load(open(sys.argv[1])))' "$STATE_DIR/edge.json"; then
+        python3 "$AWS_DIR/edge.py" outputs "$STATE_DIR"
+    fi
 }
 output() {
     python3 - "$STATE_DIR/stack.json" "$1" <<'PY'
@@ -62,7 +66,11 @@ PY
     return 1
 }
 
-require_free_subscription() {
+require_edge_configuration() {
+    if [[ $AWS_REGION == us-east-2 ]]; then
+        python3 "$AWS_DIR/edge.py" check "$STATE_DIR"
+        return
+    fi
     aws_json pricing-plan-manager get-subscription --arn "$(output SubscriptionArn)" > "$STATE_DIR/subscription.json"
     python3 - "$STATE_DIR/subscription.json" <<'PYCODE'
 import json,sys

@@ -703,6 +703,14 @@
       "Value": {
         "Fn::Sub": "https://${Distribution.DomainName}"
       }
+    },
+    "OriginDomainName": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Host",
+          "PublicDnsName"
+        ]
+      }
     }
   }
 }

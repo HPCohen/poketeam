@@ -1,6 +1,6 @@
 # Copy to aws/config.sh (gitignored). AWS CLI uses your normal credentials/profile.
 export AWS_PROFILE=default
-export AWS_REGION=us-east-1
+export AWS_REGION=us-east-2
 export STACK_NAME=poketeam
 export BUDGET_EMAIL=you@example.com
 export MONTHLY_BUDGET_USD=5

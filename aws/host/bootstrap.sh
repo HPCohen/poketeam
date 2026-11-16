@@ -1,13 +1,13 @@
 # Embedded after the DATA_VOLUME_ID assignment in EC2 user data. Runs as root.
 exec > >(tee -a /var/log/poketeam-bootstrap.log) 2>&1
-dnf install -y docker awscli2 jq xfsprogs
+dnf install -y docker awscli-2 jq xfsprogs
 install -d -m 755 /usr/local/lib/docker/cli-plugins
 compose_asset="docker-compose-linux-$(uname -m)"
 compose_url=https://github.com/docker/compose/releases/download/v5.6.0
 cd /usr/local/lib/docker/cli-plugins
 curl --fail --location --retry 3 "$compose_url/$compose_asset" -o "$compose_asset"
 curl --fail --location --retry 3 "$compose_url/checksums.txt" -o checksums.txt
-grep " $compose_asset\$" checksums.txt | sha256sum --check --strict
+grep -E " [*]?$compose_asset\$" checksums.txt | sha256sum --check --strict
 mv "$compose_asset" docker-compose
 chmod 755 docker-compose
 rm checksums.txt
@@ -53,3 +53,7 @@ swapon /swapfile || [[ $(swapon --noheadings --show=NAME) == *'/swapfile'* ]]
 grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
 systemctl daemon-reload
 systemctl enable --now docker amazon-ssm-agent
+
+# Also records successful explicit recovery if cloud-init retains an earlier failure.
+install -d -m 700 /var/lib/poketeam
+touch /var/lib/poketeam/bootstrap-complete

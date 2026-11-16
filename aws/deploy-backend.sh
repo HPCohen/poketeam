@@ -6,11 +6,11 @@ stack_outputs
 instance=$(output InstanceId)
 bucket=$(output BucketName)
 origin=$(output PublicOrigin)
-require_free_subscription
+require_edge_configuration
 release="$(date -u +%Y%m%dT%H%M%SZ)-$(python3 -c 'import secrets;print(secrets.token_hex(4))')"
 release_dir="$STATE_DIR/releases/$release"
 mkdir -p "$release_dir/host"
-docker buildx build --platform linux/arm64 --load -t "poketeam:$release" "$REPO_DIR"
+docker buildx build --platform linux/arm64 --build-arg "RUST_IMAGE=${RUST_IMAGE:-rust:1.99.1-slim-bookworm}" --load -t "poketeam:$release" "$REPO_DIR"
 docker save "poketeam:$release" | gzip > "$release_dir/image.tar.gz"
 cp "$AWS_DIR/host/compose.yaml" "$AWS_DIR/host/nginx.conf.template" "$AWS_DIR/host/activate.sh" "$AWS_DIR/host/backup.sh" "$release_dir/host/"
 python3 - "$release_dir/release.env" "$release" "$origin" "$bucket" <<'PY'
@@ -24,9 +24,13 @@ python3 "$AWS_DIR/manage.py" deploy-command "$STATE_DIR/deploy.sh" "$bucket" "$r
 wait_ssm "$instance"
 remote "$instance" "$STATE_DIR/deploy.sh"
 # Enable only after migration and local API liveness passed. Initial catalog import is asynchronous.
-aws_json cloudformation get-template --stack-name "$STACK_NAME" --template-stage Original > "$STATE_DIR/current-template.json"
 aws ec2 describe-instances --instance-ids "$instance" --query 'Reservations[0].Instances[0].PublicDnsName' --output text > "$STATE_DIR/origin-dns"
-python3 "$AWS_DIR/manage.py" enable-parameters "$STATE_DIR"
-aws cloudformation deploy --stack-name "$STACK_NAME" --template-file "$STATE_DIR/enabled-template.json" --parameter-overrides "file://$STATE_DIR/enable-parameters.json" --capabilities CAPABILITY_IAM --no-fail-on-empty-changeset
+if [[ $AWS_REGION == us-east-2 ]]; then
+    python3 "$AWS_DIR/edge.py" enable "$STATE_DIR"
+else
+    aws_json cloudformation get-template --stack-name "$STACK_NAME" --template-stage Original > "$STATE_DIR/current-template.json"
+    python3 "$AWS_DIR/manage.py" enable-parameters "$STATE_DIR"
+    aws cloudformation deploy --stack-name "$STACK_NAME" --template-file "$STATE_DIR/enabled-template.json" --parameter-overrides "file://$STATE_DIR/enable-parameters.json" --capabilities CAPABILITY_IAM --no-fail-on-empty-changeset
+fi
 stack_outputs
 printf 'API: %s/api/v1/catalog/status\nReadiness becomes healthy after initial catalog sync.\n' "$origin"

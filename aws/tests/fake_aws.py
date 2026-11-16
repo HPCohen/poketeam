@@ -24,12 +24,26 @@ def fail(message):
     sys.exit(message)
 
 
+def payload():
+    return json.loads(Path(arg("--cli-input-json")[7:]).read_text())
+
+
+def subscription():
+    value = json.loads((root / "subscription.json").read_text())
+    value["planTier"] = os.environ.get("FAKE_CF_TIER", "FREE")
+    if (root / "cancelled").exists(): value["scheduledChange"] = {"changeType": "CANCELLATION"}
+    return value
+
+
 def stack():
+    values = {
+        "InstanceId": "i-0123456789abcdef0", "BucketName": "mock-private-bucket", "DataVolumeId": "vol-0123456789abcdef0",
+        "OriginDomainName": "ec2-203-0-113-1.compute-1.amazonaws.com",
+    }
+    if os.environ.get('AWS_REGION') == 'us-east-1':
+        values.update(DistributionId="DIST123", SubscriptionStatus="ACTIVE", SubscriptionArn="arn:aws:pricingplanmanager::123456789012:subscription:example", PublicOrigin="https://example.cloudfront.net")
     return {"Stacks": [{"StackStatus": "CREATE_COMPLETE", "Outputs": [
-        {"OutputKey": k, "OutputValue": v} for k,v in {
-            "InstanceId": "i-0123456789abcdef0", "BucketName": "mock-private-bucket", "DataVolumeId": "vol-0123456789abcdef0", "DistributionId": "DIST123",
-            "SubscriptionStatus": "ACTIVE", "SubscriptionArn": "arn:aws:pricingplanmanager::123456789012:subscription:example", "PublicOrigin": "https://example.cloudfront.net",
-        }.items()]}]}
+        {"OutputKey": k, "OutputValue": v} for k,v in values.items()]}]}
 
 
 if Path(sys.argv[0]).name == "docker":
@@ -45,9 +59,9 @@ elif (service, operation) == ("sts", "get-caller-identity"):
 elif (service, operation) == ("freetier", "get-account-plan-state"):
     emit({"accountPlanType": "FREE", "accountPlanStatus": os.environ.get("FAKE_PLAN_STATUS", "ACTIVE"), "accountPlanRemainingCredits": {"amount": float(os.environ.get("FAKE_CREDITS", "100"))}, "accountPlanExpirationDate": "2027-05-01T00:00:00Z"})
 elif (service, operation) == ("ec2", "describe-instance-type-offerings"):
-    emit({"InstanceTypeOfferings": [] if os.environ.get("FAKE_NO_OFFERING") else [{"InstanceType": "t4g.small", "Location": "us-east-1b"}]})
+    emit({"InstanceTypeOfferings": [] if os.environ.get("FAKE_NO_OFFERING") else [{"InstanceType": "t4g.small", "Location": os.environ.get("AWS_REGION", "us-east-1") + "b"}]})
 elif (service, operation) == ("ec2", "describe-availability-zones"):
-    emit({"AvailabilityZones": [{"ZoneName": "us-east-1a"}, {"ZoneName": "us-east-1b"}]})
+    emit({"AvailabilityZones": [{"ZoneName": os.environ.get("AWS_REGION", "us-east-1") + "a"}, {"ZoneName": os.environ.get("AWS_REGION", "us-east-1") + "b"}]})
 elif (service, operation) == ("ec2", "describe-managed-prefix-lists"):
     print("pl-0123456789abcdef0")
 elif (service, operation) == ("ec2", "describe-instances"):
@@ -73,7 +87,55 @@ elif (service, operation) == ("cloudformation", "deploy"):
 elif (service, operation) == ("cloudformation", "get-template"):
     emit({"TemplateBody": json.loads((root / "template.json").read_text())})
 elif (service, operation) == ("pricing-plan-manager", "get-subscription"):
-    emit({"subscription": {"status": "ACTIVE", "planTier": os.environ.get("FAKE_CF_TIER", "FREE")}})
+    emit({"subscription": subscription(), "eTag": "subscription-etag"} if (root / "subscription.json").exists() else {"subscription": {"status": "ACTIVE", "planTier": os.environ.get("FAKE_CF_TIER", "FREE")}})
+elif (service, operation) == ("pricing-plan-manager", "list-subscriptions"):
+    if os.environ.get("FAKE_SUBSCRIPTION_DENIED"): fail("AccessDeniedException: explicit deny in service control policy")
+    emit({"subscriptionSummaries": [subscription()] if (root / "subscription.json").exists() and not os.environ.get("FAKE_SUBSCRIPTION_EXPIRED") else []})
+elif (service, operation) == ("pricing-plan-manager", "create-subscription"):
+    value = dict(payload(), arn="arn:aws:pricingplanmanager::123456789012:subscription:edge", status="ACTIVE")
+    (root / "subscription.json").write_text(json.dumps(value))
+    emit({"subscription": value})
+elif (service, operation) == ("pricing-plan-manager", "cancel-subscription"):
+    assert payload()['ifMatch'] == 'subscription-etag'
+    (root / "cancelled").touch()
+    emit({"subscription": subscription()})
+elif (service, operation) == ("wafv2", "list-web-acls"):
+    emit({"WebACLs": [json.loads((root / "acl.json").read_text())] if (root / "acl.json").exists() else []})
+elif (service, operation) == ("wafv2", "create-web-acl"):
+    config = payload()
+    value = dict(config, Id="acl-123", ARN="arn:aws:wafv2:us-east-1:123456789012:global/webacl/test/acl-123")
+    (root / "acl.json").write_text(json.dumps(value))
+    emit({"Summary": value})
+elif (service, operation) == ("wafv2", "list-tags-for-resource"):
+    emit({"TagInfoForResource": {"TagList": json.loads((root / "acl.json").read_text())["Tags"]}})
+elif (service, operation) == ("wafv2", "get-web-acl"):
+    emit({"WebACL": json.loads((root / "acl.json").read_text()), "LockToken": "acl-lock"})
+elif (service, operation) == ("wafv2", "delete-web-acl"):
+    assert payload()['LockToken'] == 'acl-lock'
+    (root / "acl.json").unlink()
+    emit({})
+elif (service, operation) == ("cloudfront", "list-distributions"):
+    config = json.loads((root / "distribution.json").read_text()) if (root / "distribution.json").exists() else None
+    emit({"DistributionList": {"Items": [{"Id": "DIST-EDGE", "Comment": config["Comment"]}] if config else []}})
+elif (service, operation) == ("cloudfront", "create-distribution-with-tags"):
+    config = payload()['DistributionConfigWithTags']['DistributionConfig']
+    (root / "distribution.json").write_text(json.dumps(config))
+    emit({"Distribution": {"Id": "DIST-EDGE", "ARN": "arn:aws:cloudfront::123456789012:distribution/DIST-EDGE", "DomainName": "edge.cloudfront.net", "DistributionConfig": config}})
+elif (service, operation) == ("cloudfront", "get-distribution"):
+    config = json.loads((root / "distribution.json").read_text())
+    emit({"ETag": "distribution-etag", "Distribution": {"Id": "DIST-EDGE", "ARN": "arn:aws:cloudfront::123456789012:distribution/DIST-EDGE", "DomainName": "edge.cloudfront.net", "DistributionConfig": config}})
+elif (service, operation) == ("cloudfront", "update-distribution"):
+    request = payload()
+    assert request['IfMatch'] == 'distribution-etag'
+    (root / "distribution.json").write_text(json.dumps(request['DistributionConfig']))
+    emit({})
+elif (service, operation) == ("cloudfront", "delete-distribution"):
+    assert payload()['IfMatch'] == 'distribution-etag'
+    assert not json.loads((root / "distribution.json").read_text())['Enabled']
+    (root / "distribution.json").unlink()
+    emit({})
+elif (service, operation) == ("cloudfront", "wait"):
+    emit({})
 elif (service, operation) == ("ssm", "describe-instance-information"):
     print("Online")
 elif (service, operation) == ("ssm", "send-command"):
