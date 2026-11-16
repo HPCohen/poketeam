@@ -1,0 +1,15 @@
+/backend/target/
+.env
+
+/aws/config.sh
+/aws/.state/
+/aws/__pycache__/
+/aws/tests/__pycache__/
+
+/frontend/node_modules/
+/frontend/dist/
+/frontend/test-results/
+/frontend/playwright-report/
+/frontend/*.tsbuildinfo
+
+/logs/

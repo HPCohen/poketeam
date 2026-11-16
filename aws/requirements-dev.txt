@@ -1,0 +1,2 @@
+# Offline template validation only; deployment scripts use Python standard library.
+cfn-lint==1.60.1

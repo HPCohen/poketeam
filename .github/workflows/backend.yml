@@ -1,0 +1,42 @@
+name: backend
+on: [push, pull_request]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-bookworm
+        env:
+          POSTGRES_USER: poketeam
+          POSTGRES_PASSWORD: poketeam
+          POSTGRES_DB: poketeam
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U poketeam" --health-interval 2s
+          --health-timeout 3s --health-retries 30
+    env:
+      DATABASE_URL: postgres://poketeam:poketeam@localhost:5432/poketeam
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path backend/Cargo.toml --check
+      - run: cargo clippy --manifest-path backend/Cargo.toml --all-targets --locked -- -D warnings
+      - run: cargo test --manifest-path backend/Cargo.toml --locked
+      - run: scripts/check-openapi.sh
+      - run: docker build -t poketeam:ci .
+
+  aws-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python3 -m unittest discover -s aws/tests -v
+      - run: for script in aws/*.sh aws/host/*.sh; do bash -n "$script"; done
+      - run: pip install -r aws/requirements-dev.txt
+      - run: python3 aws/template.py > /tmp/poketeam-stack.json
+      - run: cfn-lint --regions us-east-1 --template /tmp/poketeam-stack.json

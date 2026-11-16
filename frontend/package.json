@@ -1,0 +1,36 @@
+{
+  "name": "poketeam-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b",
+    "generate:api": "openapi-typescript ../backend/openapi.json -o src/api/generated.d.ts",
+    "check:api": "node scripts/check-api.mjs",
+    "test": "vitest run",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "5.90.16",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-router-dom": "7.12.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.0",
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.1",
+    "@types/node": "22.19.7",
+    "@types/react": "19.2.8",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "5.1.2",
+    "jsdom": "27.4.0",
+    "openapi-typescript": "7.10.1",
+    "typescript": "5.9.3",
+    "vite": "7.3.1",
+    "vitest": "3.2.4"
+  }
+}

@@ -1,0 +1,47 @@
+x-app: &app
+  build: .
+  image: poketeam:local
+  environment: &env
+    DATABASE_URL: postgres://poketeam:poketeam@db:5432/poketeam
+    PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:3000}
+    LISTEN_ADDR: 0.0.0.0:3000
+    RUST_LOG: ${RUST_LOG:-poketeam=info,tower_http=info}
+    UPSTREAM_URL: ${UPSTREAM_URL:-https://pokeapi.co/api/v2/}
+    UPSTREAM_ALLOWED_HOSTS: ${UPSTREAM_ALLOWED_HOSTS:-pokeapi.co,raw.githubusercontent.com}
+    ALLOW_INSECURE_UPSTREAM: ${ALLOW_INSECURE_UPSTREAM:-false}
+    SCAN_INTERVAL_SECONDS: ${SCAN_INTERVAL_SECONDS:-86400}
+  depends_on:
+    db:
+      condition: service_healthy
+services:
+  db:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_USER: poketeam
+      POSTGRES_PASSWORD: poketeam
+      POSTGRES_DB: poketeam
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U poketeam -d poketeam"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  migrate:
+    <<: *app
+    command: ["migrate"]
+    profiles: ["tools"]
+  api:
+    <<: *app
+    command: ["serve"]
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+  worker:
+    <<: *app
+    command: ["worker"]
+    restart: unless-stopped
+volumes:
+  postgres_data:

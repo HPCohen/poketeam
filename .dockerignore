@@ -1,0 +1,10 @@
+.git
+backend/target
+.env
+
+aws/.state
+aws/config.sh
+**/__pycache__
+.aws
+.codex
+.agents

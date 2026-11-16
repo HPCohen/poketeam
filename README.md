@@ -1,32 +1,37 @@
 # Poketeam
-Pokemon team builder.
 
-## Task 1: Team Builder
-1. Display all Pokémon in a responsive grid showing name, type(s), stats, and sprite image.
-2. Allow users to build a team of up to 6 Pokémon. Order matters; users can add, remove,
-and reorder. Persist all team information so a user can access their teams across sessions.
-3. Allow users to create, delete, and update multiple teams using the team builder UI.
-4. Given a Pokémon team, create an optimal counter team of equal size. Open-ended. Show your creativity here!
+A Rust/Axum REST API and periodic worker backed by PostgreSQL. Both commands use the same image. The catalog contains species’ default varieties across all generations; API requests read only local data. The React/TypeScript frontend lives in `frontend/`; production deployment remains a separate action.
 
-## Task 2: Data Change Notifications
-PokéAPI data can change on rare occasions.
-1. Create a backend job to scan for changes in any data used by the team builder.
-2. If a user's Pokémon were involved in a change within the last week, display a frontend alert to that user describing what changed.
-3. Prove that this feature works in a demo.
+```sh
+docker compose up -d db
+docker compose build
+docker compose run --rm migrate
+docker compose up -d api worker
+# Ready once the worker saves the type chart and its first Pokémon:
+curl http://localhost:3000/health/ready
+```
 
-## Task 3: Technical Document
-1. Create a one-page README.md on key design decisions and assumptions, showing your technical acumen and communication skills.
+**Design.** Explicit SQL, a single crate, and no broker or distributed cache keep the architecture small. Each sync follows paginated resource lists and fetches details sequentially with reqwest’s JSON decoder. It saves the type chart first, then commits each Pokémon with its sprite and change event before fetching the next. An advisory lock prevents overlapping scans. Failures retain already committed records; missing Pokémon are marked unavailable only after a complete scan; the worker retries after 15 minutes and normally refreshes 24 hours after success. PostgreSQL stores small sprites so each image and Pokémon row commit together.
 
-# Architecture
-## Backend API
-- Get all pokemon
-- Team CRUD
-    - Add pokemon (6 max)
-    - Remove pokemon
-    - Change order
-- Get counter team
-    - Given team id, optimize based on max type advantage
+**Ownership and teams.** `POST /api/v1/session` with `{}` establishes a persistent anonymous HttpOnly cookie. Same-origin JSON mutations require an exact `Origin` match. HTTPS origins enable Secure cookies. Teams have zero to six distinct, ordered members and optimistic revisions; ownership is enforced in SQL. Clearing the cookie loses access. Accounts and cross-device recovery are outside v1.
+
+**Counter teams.** Power mode prioritizes coverage, then total base stats, then matchup score. Rival mode preserves total stats within ±5% and prioritizes coverage and matchup score. Both are deterministic greedy/local-search heuristics capped at ten improvement passes. Own-type attacks multiply effectiveness across defender types; shared weaknesses incur a penalty. Moves, abilities, items, levels, and battle outcomes are outside the model. Rival search failure means the heuristic found no qualifying seed, not that none exists.
+
+**Change alerts.** Initial import is silent. Consumed fields, availability, sprite source/content, and relevant type-chart relationships produce structured events with detection timestamps. Notifications deduplicate events across the owner’s current teams for an inclusive seven-day window. History is pruned after 30 days during successful scans. Existing teams retain unavailable members; new selections and counters use active Pokémon.
+
+**Verification.** Install Rust 1.99.1, start the database above, then run:
+
+```sh
+export DATABASE_URL=postgres://poketeam:poketeam@localhost:5432/poketeam
+cargo test --locked --manifest-path backend/Cargo.toml
+scripts/demo.sh             # Local mock baseline → stat/sprite change → alert → dedup → expiry
+scripts/check-openapi.sh
+```
+
+Tests use isolated SQLx databases and a local HTTP fixture; CI never calls live PokéAPI. CI also checks formatting, Clippy, OpenAPI drift, and container builds. See [captured demo](docs/demo.md), [API/TypeScript integration](docs/api.md), [operations and backup/restore](docs/operations.md), [approved plan](plans/approved-plan.md), and [implementation/verification record](plans/implementation.md). Configuration is documented in [.env.example](.env.example); Compose credentials are for local development.
+
+For AWS hosting, see [AWS CLI deployment scripts](aws/README.md) for a single-host deployment, Free Tier checks, HTTPS, backups, future frontend uploads, and teardown.
 
 ## Frontend
-- Pokemon viewer
-- Team list
+
+Run `cd frontend && npm ci && npm run dev`, then open **http://127.0.0.1:5173**. Set the backend’s `PUBLIC_ORIGIN=http://127.0.0.1:5173` to match that exact browser origin. Vite proxies API requests to port 3000. `npm run build` produces `frontend/dist` for the existing AWS deployment scripts. See [frontend setup and checks](frontend/README.md) and [implementation record](plans/frontend.md).
