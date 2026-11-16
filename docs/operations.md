@@ -56,19 +56,6 @@ PUBLIC_ORIGIN=http://127.0.0.1:5173 \
 scripts/sync-with-log.sh
 ```
 
-## Minimal reqwest diagnostic
-
-Run the standalone probe without a database or application environment:
-
-```sh
-cargo run --locked --manifest-path backend/Cargo.toml --bin reqwest-probe -- \
-  https://pokeapi.co/api/v2/pokemon/4/
-```
-
-With no URL arguments it uses that endpoint. Supply multiple URLs (including repeated URLs) to fetch sequentially with one shared client and exercise connection reuse. Each response is decoded using reqwest's built-in JSON decoder, retained in memory, and printed in full to stdout. Stderr records URL, status, HTTP version, final URL, advertised length, timings for headers and complete JSON, and full failure context. A failure exits nonzero.
-
-The probe uses the sync client's reqwest/TLS features, User-Agent, 30-second total timeout, and 10-second connect timeout. It uses normal reqwest redirects and omits application configuration, model conversion, sprite downloads, and database access. To capture everything, redirect `> logs/reqwest-probe.log 2>&1` after creating `logs/`. Existing Cargo run commands still default to the application binary.
-
 ## Sprite variant metadata
 
 Migration `0002_sprite_variants.sql` adds `pokemon.sprite_variants` and `team_members.sprite_variant`. Existing records are backfilled with their current default image, and existing teams keep the default. Run the normal migration command before updating the API, then run a sync to populate all available variant URLs. Sync continues to download/cache only the default sprite; other images (including SVG and GIF) load from their upstream URLs in the browser when chosen. This preserves incremental sync and avoids storing every game/artwork variant in PostgreSQL.

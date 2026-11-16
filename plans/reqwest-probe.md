@@ -15,3 +15,7 @@ Validation: build, formatting and Clippy; run against a small local HTTP fixture
 - Live run requested Pokémon 4 twice, then Pokémon 1, through one shared client. All three responses completed successfully over HTTP/1.1. Header/body totals: 0.464s/5.752s, 0.253s/5.559s, and 0.286s/4.285s. The run retained three decoded responses and exited 0.
 - Full decoded JSON and timings are saved in `logs/reqwest-probe-20261115.log` (approximately 1.4 MiB, ignored by Git).
 - The earlier sync timeout did not reproduce in this small run. This demonstrates that reqwest can fetch these endpoints in this environment; it does not establish whether earlier failures were intermittent or related to the sync request sequence/client configuration. No timeout, TLS feature, or application sync behavior was changed by adding the probe.
+
+## Removal — 2026-11-16
+
+The user requested committing the diagnostic binary's deletion after network diagnosis was complete. Removed `backend/src/bin/reqwest-probe.rs` and its runnable instructions from the operations guide. The application retains its normal logged sync command and reqwest JSON decoding; no dependencies or application behavior changed. The original investigation notes above remain as history. Verified Cargo target discovery no longer includes the probe.
