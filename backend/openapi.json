@@ -168,6 +168,39 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "types",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "type_match",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TypeMatch"
+            }
+          },
+          {
+            "name": "generation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Category"
+            }
           }
         ],
         "responses": {
@@ -183,6 +216,26 @@
           },
           "304": {
             "description": ""
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           },
           "503": {
             "description": "",
@@ -867,12 +920,20 @@
           "total",
           "limit",
           "offset",
-          "catalog_revision"
+          "catalog_revision",
+          "generations"
         ],
         "properties": {
           "catalog_revision": {
             "type": "integer",
             "format": "int64"
+          },
+          "generations": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32"
+            }
           },
           "limit": {
             "type": "integer",
@@ -924,6 +985,14 @@
             "format": "int64"
           }
         }
+      },
+      "Category": {
+        "type": "string",
+        "enum": [
+          "starter",
+          "legendary",
+          "mythical"
+        ]
       },
       "CounterRequest": {
         "type": "object",
@@ -1024,6 +1093,15 @@
             "items": {
               "type": "integer",
               "format": "int32"
+            }
+          },
+          "sprite_selections": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
             }
           }
         },
@@ -1166,12 +1244,34 @@
             "type": "integer",
             "format": "int32"
           },
+          "generation": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
           "id": {
             "type": "integer",
             "format": "int32"
           },
+          "is_legendary": {
+            "type": "boolean"
+          },
+          "is_mythical": {
+            "type": "boolean"
+          },
+          "is_starter": {
+            "type": "boolean"
+          },
           "name": {
             "type": "string"
+          },
+          "selected_sprite": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "species_id": {
             "type": "integer",
@@ -1182,6 +1282,15 @@
               "string",
               "null"
             ]
+          },
+          "sprite_variants": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "stats": {
             "$ref": "#/components/schemas/Stats"
@@ -1348,6 +1457,13 @@
           }
         }
       },
+      "TypeMatch": {
+        "type": "string",
+        "enum": [
+          "all",
+          "any"
+        ]
+      },
       "TypeResponse": {
         "type": "object",
         "required": [
@@ -1392,6 +1508,15 @@
           "revision": {
             "type": "integer",
             "format": "int64"
+          },
+          "sprite_selections": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           }
         },
         "additionalProperties": false

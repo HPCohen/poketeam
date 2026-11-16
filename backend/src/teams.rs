@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{PgConnection, Row};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -25,12 +25,16 @@ pub struct CreateTeam {
     name: String,
     #[serde(default)]
     pokemon_ids: Vec<i32>,
+    #[serde(default)]
+    sprite_selections: BTreeMap<String, String>,
 }
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateTeam {
     name: String,
     pokemon_ids: Vec<i32>,
+    #[serde(default)]
+    sprite_selections: BTreeMap<String, String>,
     revision: i64,
 }
 #[derive(Serialize, ToSchema)]
@@ -61,7 +65,7 @@ async fn load_team(conn: &mut PgConnection, id: Uuid, owner: Uuid) -> ApiResult<
         .fetch_optional(&mut *conn)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let rows=sqlx::query("SELECT p.* FROM team_members m JOIN pokemon p ON p.id=m.pokemon_id WHERE m.team_id=$1 ORDER BY m.position").bind(id).fetch_all(conn).await?;
+    let rows=sqlx::query("SELECT p.*, m.sprite_variant FROM team_members m JOIN pokemon p ON p.id=m.pokemon_id WHERE m.team_id=$1 ORDER BY m.position").bind(id).fetch_all(conn).await?;
     Ok(Team {
         id,
         name: row.try_get("name")?,
@@ -70,8 +74,11 @@ async fn load_team(conn: &mut PgConnection, id: Uuid, owner: Uuid) -> ApiResult<
         updated_at: row.try_get("updated_at")?,
         pokemon: rows
             .iter()
-            .map(model::from_row)
-            .map(|p| p.map(|p| p.public()))
+            .map(|row| {
+                let mut pokemon = model::from_row(row)?.public();
+                pokemon.selected_sprite = row.try_get("sprite_variant")?;
+                Ok::<_, sqlx::Error>(pokemon)
+            })
             .collect::<Result<_, _>>()?,
     })
 }
@@ -79,9 +86,10 @@ async fn replace_members(
     conn: &mut PgConnection,
     id: Uuid,
     ids: &[i32],
-    retained: &[i32],
+    selections: &BTreeMap<String, String>,
+    retained: &BTreeMap<i32, Option<String>>,
 ) -> ApiResult<()> {
-    // Serialize selection validation with catalog publication.
+    // Serialize validation with per-record catalog commits.
     let revision: i64 =
         sqlx::query_scalar("SELECT revision FROM catalog_state WHERE singleton FOR SHARE")
             .fetch_one(&mut *conn)
@@ -89,30 +97,56 @@ async fn replace_members(
     if !ids.is_empty() && revision == 0 {
         return Err(unavailable());
     }
-    let found: Vec<(i32, bool)> = sqlx::query_as("SELECT id,active FROM pokemon WHERE id=ANY($1)")
+    if selections
+        .keys()
+        .any(|key| !ids.iter().any(|id| id.to_string() == *key))
+    {
+        return Err(ApiError::invalid(
+            "Sprite selections must belong to the team's Pokémon",
+        ));
+    }
+    let found = sqlx::query("SELECT * FROM pokemon WHERE id=ANY($1)")
         .bind(ids)
         .fetch_all(&mut *conn)
-        .await?;
+        .await?
+        .iter()
+        .map(model::from_row)
+        .collect::<Result<Vec<_>, _>>()?;
     if found.len() != ids.len()
         || found
             .iter()
-            .any(|(id, active)| !active && !retained.contains(id))
+            .any(|pokemon| !pokemon.active && !retained.contains_key(&pokemon.id))
     {
         return Err(ApiError::invalid(
             "Unknown or newly selected unavailable Pokémon",
         ));
     }
+    let mut members = Vec::new();
+    for pokemon_id in ids {
+        let previous = retained.get(pokemon_id).and_then(|value| value.as_deref());
+        let requested = selections
+            .get(&pokemon_id.to_string())
+            .map(String::as_str)
+            .or(previous);
+        let variant = requested.filter(|value| *value != "front_default");
+        let available = found
+            .iter()
+            .find(|pokemon| pokemon.id == *pokemon_id)
+            .expect("validated Pokémon ID");
+        if variant.is_some_and(|value| {
+            !available.sprite_variants.contains_key(value) && Some(value) != previous
+        }) {
+            return Err(ApiError::invalid("Unknown sprite version for this Pokémon"));
+        }
+        members.push((*pokemon_id, variant));
+    }
     sqlx::query("DELETE FROM team_members WHERE team_id=$1")
         .bind(id)
         .execute(&mut *conn)
         .await?;
-    for (position, pokemon_id) in ids.iter().enumerate() {
-        sqlx::query("INSERT INTO team_members(team_id,pokemon_id,position) VALUES($1,$2,$3)")
-            .bind(id)
-            .bind(pokemon_id)
-            .bind(position as i16)
-            .execute(&mut *conn)
-            .await?;
+    for (position, (pokemon_id, variant)) in members.into_iter().enumerate() {
+        sqlx::query("INSERT INTO team_members(team_id,pokemon_id,position,sprite_variant) VALUES($1,$2,$3,$4)")
+            .bind(id).bind(pokemon_id).bind(position as i16).bind(variant).execute(&mut *conn).await?;
     }
     Ok(())
 }
@@ -152,7 +186,14 @@ pub(crate) async fn create_team(
         .bind(now)
         .execute(&mut *tx)
         .await?;
-    replace_members(&mut tx, id, &body.pokemon_ids, &[]).await?;
+    replace_members(
+        &mut tx,
+        id,
+        &body.pokemon_ids,
+        &body.sprite_selections,
+        &BTreeMap::new(),
+    )
+    .await?;
     let team = load_team(&mut tx, id, owner).await?;
     tx.commit().await?;
     Ok((StatusCode::CREATED, Json(team)))
@@ -191,12 +232,20 @@ pub(crate) async fn update_team(
             "Reload the team and retry with its current revision",
         ));
     }
-    let retained: Vec<i32> =
-        sqlx::query_scalar("SELECT pokemon_id FROM team_members WHERE team_id=$1")
+    let retained: Vec<(i32, Option<String>)> =
+        sqlx::query_as("SELECT pokemon_id,sprite_variant FROM team_members WHERE team_id=$1")
             .bind(id)
             .fetch_all(&mut *tx)
             .await?;
-    replace_members(&mut tx, id, &body.pokemon_ids, &retained).await?;
+    let retained = retained.into_iter().collect();
+    replace_members(
+        &mut tx,
+        id,
+        &body.pokemon_ids,
+        &body.sprite_selections,
+        &retained,
+    )
+    .await?;
     sqlx::query("UPDATE teams SET name=$2,revision=revision+1,updated_at=$3 WHERE id=$1")
         .bind(id)
         .bind(name)

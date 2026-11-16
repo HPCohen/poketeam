@@ -1,11 +1,86 @@
 import { expect, test, type Page } from "@playwright/test";
 import { bulbasaur, charmander, counter, types } from "../tests/fixtures";
-import type { Team } from "../src/api/client";
-async function backend(page: Page) {
+import type { Pokemon, Team } from "../src/api/client";
+async function backend(page: Page, advanced = false) {
   let session = false;
   let nextId = 1;
   const teams: Team[] = [];
   let change = true;
+  const dataset: Pokemon[] = [
+    bulbasaur,
+    charmander,
+    ...(advanced
+      ? [
+          {
+            ...charmander,
+            id: 6,
+            species_id: 6,
+            name: "charizard",
+            types: ["fire", "flying"],
+          },
+          {
+            ...bulbasaur,
+            id: 153,
+            species_id: 153,
+            name: "bayleef",
+            types: ["grass"],
+            generation: 2,
+          },
+          {
+            ...bulbasaur,
+            id: 150,
+            species_id: 150,
+            name: "mewtwo",
+            types: ["psychic"],
+            is_starter: false,
+            is_legendary: true,
+          },
+          {
+            ...bulbasaur,
+            id: 151,
+            species_id: 151,
+            name: "mew",
+            types: ["psychic"],
+            is_starter: false,
+            is_mythical: true,
+          },
+          {
+            ...bulbasaur,
+            id: 245,
+            species_id: 245,
+            name: "suicune",
+            types: ["water"],
+            generation: 2,
+            is_starter: false,
+            is_legendary: true,
+          },
+        ]
+      : []),
+  ];
+  const member = (
+    id: number,
+    selections?: Record<string, string>,
+    previous: Pokemon[] = [],
+  ) => {
+    const pokemon = dataset.find((pokemon) => pokemon.id === id)!;
+    const selection = selections?.[String(id)];
+    return {
+      ...pokemon,
+      selected_sprite:
+        selection === "front_default"
+          ? null
+          : selection ||
+            previous.find((p) => p.id === id)?.selected_sprite ||
+            null,
+    };
+  };
+  await page.route("https://example.com/**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "image/svg+xml",
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="red"/></svg>',
+    }),
+  );
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -29,7 +104,7 @@ async function backend(page: Page) {
         name: body.name,
         revision: 1,
         pokemon: body.pokemon_ids.map((id: number) =>
-          id === 1 ? bulbasaur : charmander,
+          member(id, body.sprite_selections),
         ),
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
@@ -52,7 +127,7 @@ async function backend(page: Page) {
           name: body.name,
           revision: team.revision + 1,
           pokemon: body.pokemon_ids.map((id: number) =>
-            id === 1 ? bulbasaur : charmander,
+            member(id, body.sprite_selections, team.pokemon),
           ),
         });
       }
@@ -61,9 +136,29 @@ async function backend(page: Page) {
     if (path === "/types") return json(types);
     if (path === "/pokemon") {
       const search = url.searchParams.get("search") || "";
-      const type = url.searchParams.get("type");
-      const pokemon = [bulbasaur, charmander].filter(
-        (p) => p.name.includes(search) && (!type || p.types.includes(type)),
+      const selectedTypes = (
+        url.searchParams.get("types") ||
+        url.searchParams.get("type") ||
+        ""
+      )
+        .split(",")
+        .filter(Boolean);
+      const generation = url.searchParams.get("generation");
+      const category = url.searchParams.get("category");
+      const pokemon = dataset.filter(
+        (p) =>
+          p.name.includes(search.toLowerCase()) &&
+          (!generation || p.generation === Number(generation)) &&
+          (!category ||
+            (category === "starter"
+              ? p.is_starter
+              : category === "legendary"
+                ? p.is_legendary
+                : p.is_mythical)) &&
+          (!selectedTypes.length ||
+            (url.searchParams.get("type_match") === "any"
+              ? selectedTypes.some((type) => p.types.includes(type))
+              : selectedTypes.every((type) => p.types.includes(type)))),
       );
       return json({
         pokemon,
@@ -71,10 +166,15 @@ async function backend(page: Page) {
         offset: 0,
         limit: 20,
         catalog_revision: 1,
+        generations: [1, 2],
       });
     }
     if (path.startsWith("/pokemon/"))
-      return json(path.endsWith("/4") ? charmander : bulbasaur);
+      return json(
+        dataset.find(
+          (pokemon) => pokemon.id === Number(path.split("/").at(-1)),
+        ) || bulbasaur,
+      );
     if (path === "/notifications") {
       const notifications =
         change && teams.length
@@ -102,6 +202,13 @@ async function backend(page: Page) {
     return json({}, 404);
   });
 }
+async function chooseType(page: Page, name: string) {
+  const checkbox = page.getByRole("checkbox", { name: `${name} type` });
+  if (!(await checkbox.isChecked())) await checkbox.click();
+  // URL-backed controls update after router navigation, so await the rendered state.
+  await expect(checkbox).toBeChecked();
+}
+
 test("complete team workflow, notifications, and direct links", async ({
   page,
 }) => {
@@ -162,9 +269,7 @@ test("keyboard navigation, public exploration and staged add", async ({
   ).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(page.locator("main")).toBeFocused();
-  await page
-    .getByRole("combobox", { name: "Type", exact: true })
-    .selectOption("fire");
+  await chooseType(page, "Fire");
   await expect(page.locator(".pokemon")).toHaveCount(1);
   await page.getByRole("button", { name: "Add to team" }).click();
   await page.getByRole("button", { name: "Start new draft" }).click();
@@ -174,5 +279,141 @@ test("keyboard navigation, public exploration and staged add", async ({
   await page.getByLabel("Team name").fill("Keyboard team");
   await page.getByRole("button", { name: "Save team" }).focus();
   await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/\/teams\/team-1$/);
+});
+
+test("sprite previews, saved selections, reordering and independent teams", async ({
+  page,
+}) => {
+  await backend(page);
+  await page.goto("/pokemon/1");
+  await page.getByRole("button", { name: "Get started" }).click();
+  await page
+    .getByRole("combobox", { name: "Sprite for bulbasaur" })
+    .selectOption("front_shiny");
+  await expect(page.locator(".detail img")).toHaveAttribute(
+    "src",
+    "https://example.com/shiny.png",
+  );
+  await page.getByRole("button", { name: "Add to team" }).click();
+  await page.getByRole("button", { name: "Start new draft" }).click();
+  await page.getByLabel("Team name").fill("Originals");
+  await expect(
+    page.getByRole("combobox", { name: "Sprite for bulbasaur" }),
+  ).toHaveValue("front_shiny");
+  await page.getByRole("button", { name: "Save team" }).click();
+  await expect(page).toHaveURL(/\/teams\/team-1$/);
+  await page.reload();
+  await expect(
+    page.getByRole("combobox", { name: "Sprite for bulbasaur" }),
+  ).toHaveValue("front_shiny");
+  await page.getByRole("button", { name: "Add Pokémon", exact: true }).click();
+  await page
+    .getByRole("combobox", { name: "Sprite for charmander" })
+    .selectOption("versions/generation-i/red-blue/back_default");
+  await page
+    .getByRole("combobox", { name: "Sprite for bulbasaur" })
+    .selectOption("other/official-artwork/front_default");
+  await page.getByRole("button", { name: "Move charmander left" }).click();
+  await page.getByRole("button", { name: "Save team" }).click();
+  await expect(page.getByRole("status")).toHaveText("Team saved.");
+  await page.reload();
+  await expect(page.locator(".roster-member").first()).toContainText(
+    "charmander",
+  );
+  await expect(
+    page.getByRole("combobox", { name: "Sprite for charmander" }),
+  ).toHaveValue("versions/generation-i/red-blue/back_default");
+  await expect(
+    page.getByRole("combobox", { name: "Sprite for bulbasaur" }),
+  ).toHaveValue("other/official-artwork/front_default");
+  await page.goto("/pokemon/1");
+  await page
+    .getByRole("combobox", { name: "Sprite for bulbasaur" })
+    .selectOption("other/showdown/front_default");
+  await expect(page.locator(".detail img")).toHaveAttribute(
+    "src",
+    "https://example.com/animated.gif",
+  );
+  await page.getByRole("button", { name: "Add to team" }).click();
+  await page.getByRole("button", { name: "Start new draft" }).click();
+  await page.getByLabel("Team name").fill("Animated");
+  await page.getByRole("button", { name: "Save team" }).click();
+  await expect(page).toHaveURL(/\/teams\/team-2$/);
+  await page.reload();
+  await expect(
+    page.getByRole("combobox", { name: "Sprite for bulbasaur" }),
+  ).toHaveValue("other/showdown/front_default");
+  await page.goto("/teams/team-1");
+  await expect(
+    page.getByRole("combobox", { name: "Sprite for bulbasaur" }),
+  ).toHaveValue("other/official-artwork/front_default");
+});
+
+test("combined type, generation and group filters in explorer and team builder", async ({
+  page,
+}) => {
+  await backend(page, true);
+  await page.goto("/pokemon");
+  await chooseType(page, "Fire");
+  await chooseType(page, "Flying");
+  await expect(page.locator(".pokemon")).toHaveCount(1);
+  await expect(page.locator(".pokemon")).toContainText("charizard");
+  await expect(page).toHaveURL(/types=fire%2Cflying/);
+  await page
+    .getByRole("combobox", { name: "Type matching" })
+    .selectOption("any");
+  await expect(page.locator(".pokemon")).toHaveCount(2);
+  await page.goBack();
+  await expect(
+    page.getByRole("combobox", { name: "Type matching" }),
+  ).toHaveValue("all");
+  await expect(page.locator(".pokemon")).toHaveCount(1);
+  await page.getByRole("button", { name: "Clear filters" }).click();
+  await chooseType(page, "Grass");
+  await page.getByRole("combobox", { name: "Introduced in" }).selectOption("2");
+  await page
+    .getByRole("combobox", { name: "Pokémon group" })
+    .selectOption("starter");
+  await expect(page.locator(".pokemon")).toHaveCount(1);
+  await expect(page.locator(".pokemon")).toContainText("bayleef");
+  await page.reload();
+  await expect(
+    page.getByRole("checkbox", { name: "Grass type" }),
+  ).toBeChecked();
+  await expect(
+    page.getByRole("combobox", { name: "Introduced in" }),
+  ).toHaveValue("2");
+  await expect(
+    page.getByRole("combobox", { name: "Pokémon group" }),
+  ).toHaveValue("starter");
+  await page.getByRole("button", { name: "Clear filters" }).click();
+  await page.getByRole("combobox", { name: "Introduced in" }).selectOption("2");
+  await page
+    .getByRole("combobox", { name: "Pokémon group" })
+    .selectOption("legendary");
+  await expect(page.locator(".pokemon")).toHaveCount(1);
+  await expect(page.locator(".pokemon")).toContainText("suicune");
+  await page
+    .getByRole("combobox", { name: "Pokémon group" })
+    .selectOption("mythical");
+  await expect(page.getByText("No Pokémon match these filters.")).toBeVisible();
+  await page.getByRole("combobox", { name: "Introduced in" }).selectOption("");
+  await expect(page.locator(".pokemon")).toHaveCount(1);
+  await expect(page.locator(".pokemon")).toContainText("mew");
+  await page.getByRole("button", { name: "Get started" }).click();
+  await page.getByRole("link", { name: "Your teams" }).click();
+  await page.getByRole("link", { name: "Build a team" }).click();
+  await page.getByLabel("Team name").fill("Filtered starters");
+  await chooseType(page, "Fire");
+  await chooseType(page, "Flying");
+  await page
+    .getByRole("combobox", { name: "Pokémon group" })
+    .selectOption("starter");
+  await expect(page.locator(".pokemon")).toHaveCount(1);
+  await page.getByRole("button", { name: "Add Pokémon", exact: true }).click();
+  await expect(page.locator(".roster")).toContainText("charizard");
+  await expect(page.getByLabel("Team name")).toHaveValue("Filtered starters");
+  await page.getByRole("button", { name: "Save team" }).click();
   await expect(page).toHaveURL(/\/teams\/team-1$/);
 });

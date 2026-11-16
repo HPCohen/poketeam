@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import {
   Link,
   useNavigate,
@@ -14,9 +14,12 @@ import {
   PokemonCard,
   Sprite,
   Types,
+  PokemonMetadata,
   pageOffset,
+  generationLabel,
 } from "../shared";
 import { useSession } from "../session";
+import { SpritePicker } from "./sprites";
 export function AddToTeam({ pokemon }: { pokemon: Pokemon }) {
   const { ready } = useSession();
   const [open, setOpen] = useState(false);
@@ -75,10 +78,25 @@ export function Catalog({
   detailBase?: string;
 }) {
   const [params, setParams] = useSearchParams();
+  // Keep rapid control changes together while URL navigation is still pending.
+  const pendingParams = useRef(params);
+  useEffect(() => {
+    pendingParams.current = params;
+  }, [params]);
   const search = params.get("search") || "";
   const [input, setInput] = useState(search);
   const offset = pageOffset(params.get("offset"));
-  const type = params.get("type") || "";
+  const selectedTypes = [
+    ...new Set(
+      (params.get("types") || params.get("type") || "")
+        .split(",")
+        .map((type) => type.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
+  const typeMatch = params.get("type_match") || "all";
+  const generation = params.get("generation") || "";
+  const category = params.get("category") || "";
   useEffect(() => {
     setInput(search);
   }, [search]);
@@ -87,12 +105,14 @@ export function Catalog({
     const timer = setTimeout(
       () =>
         setParams(
-          (previous) => {
-            const next = new URLSearchParams(previous);
-            next.set("search", input);
+          (() => {
+            const next = new URLSearchParams(pendingParams.current);
+            if (input) next.set("search", input);
+            else next.delete("search");
             next.delete("offset");
+            pendingParams.current = next;
             return next;
-          },
+          })(),
           { replace: true },
         ),
       300,
@@ -103,23 +123,34 @@ export function Catalog({
     limit: "20",
     offset: String(offset),
     search,
-    ...(type ? { type } : {}),
+    ...(selectedTypes.length
+      ? { types: selectedTypes.join(","), type_match: typeMatch }
+      : {}),
+    ...(generation ? { generation } : {}),
+    ...(category ? { category } : {}),
   });
   const catalog = useQuery({
     queryKey: ["pokemon", query.toString()],
     queryFn: ({ signal }) => api.catalog(query, signal),
+    placeholderData: keepPreviousData,
   });
   const types = useQuery({
     queryKey: ["types"],
     queryFn: ({ signal }) => api.types(signal),
   });
   function change(key: string, value: string) {
-    setParams((previous) => {
-      const next = new URLSearchParams(previous);
-      next.set(key, value);
-      if (key !== "offset") next.delete("offset");
-      return next;
-    });
+    const next = new URLSearchParams(pendingParams.current);
+    if (value) next.set(key, value);
+    else next.delete(key);
+    if (key === "types") next.delete("type");
+    if (key !== "offset") next.delete("offset");
+    pendingParams.current = next;
+    setParams(next);
+  }
+  function clear() {
+    pendingParams.current = new URLSearchParams();
+    setInput("");
+    setParams(pendingParams.current);
   }
   return (
     <section>
@@ -132,28 +163,113 @@ export function Catalog({
         </div>
         <p>Explore. Compare. Build something great.</p>
       </div>
-      <div className="filters">
-        <label>
-          Search Pokémon
-          <input
-            type="search"
-            placeholder="Search by name…"
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-          />
-        </label>
-        <label>
-          Type
-          <select
-            value={type}
-            onChange={(event) => change("type", event.target.value)}
-          >
-            <option value="">All types</option>
-            {types.data?.types.map((t) => (
-              <option key={t}>{t}</option>
+      <div className="catalog-filters card">
+        <div className="filter-fields">
+          <label>
+            Search Pokémon
+            <input
+              type="search"
+              placeholder="Search by name…"
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+            />
+          </label>
+          <label>
+            Introduced in
+            <select
+              value={generation}
+              onChange={(event) => change("generation", event.target.value)}
+            >
+              <option value="">All generations</option>
+              {catalog.data?.generations?.map((value) => (
+                <option key={value} value={String(value)}>
+                  Generation {generationLabel(value)}
+                </option>
+              ))}
+              {generation &&
+                !catalog.data?.generations?.includes(Number(generation)) && (
+                  <option value={generation}>
+                    Generation {generationLabel(Number(generation))}
+                  </option>
+                )}
+            </select>
+          </label>
+          <label>
+            Pokémon group
+            <select
+              value={category}
+              onChange={(event) => change("category", event.target.value)}
+            >
+              <option value="">All Pokémon</option>
+              <option value="starter">Starter families</option>
+              <option value="legendary">Legendary</option>
+              <option value="mythical">Mythical</option>
+            </select>
+          </label>
+          <label>
+            Type matching
+            <select
+              value={typeMatch}
+              onChange={(event) =>
+                change(
+                  "type_match",
+                  event.target.value === "all" ? "" : event.target.value,
+                )
+              }
+            >
+              <option value="all" disabled={selectedTypes.length > 2}>
+                All selected types
+              </option>
+              <option value="any">Any selected type</option>
+            </select>
+          </label>
+        </div>
+        <fieldset className="type-filter">
+          <legend>Types</legend>
+          <div className="type-choices">
+            {types.data?.types.map((type) => (
+              <label
+                key={type}
+                className={`type-choice badge type-${type}${selectedTypes.includes(type) ? " checked" : ""}`}
+              >
+                <input
+                  type="checkbox"
+                  aria-label={`${type.charAt(0).toUpperCase() + type.slice(1)} type`}
+                  checked={selectedTypes.includes(type)}
+                  disabled={
+                    typeMatch === "all" &&
+                    selectedTypes.length >= 2 &&
+                    !selectedTypes.includes(type)
+                  }
+                  onChange={() =>
+                    change(
+                      "types",
+                      (selectedTypes.includes(type)
+                        ? selectedTypes.filter((value) => value !== type)
+                        : [...selectedTypes, type]
+                      )
+                        .sort()
+                        .join(","),
+                    )
+                  }
+                />
+                {type}
+              </label>
             ))}
-          </select>
-        </label>
+          </div>
+        </fieldset>
+        <div className="filter-summary">
+          <p>
+            {typeMatch === "all"
+              ? "Match both types of a dual-type Pokémon, or choose one type."
+              : "Match Pokémon with at least one selected type."}
+            {category === "starter" &&
+              " Starter families include evolutions, Pikachu and Eevee."}
+          </p>
+          <button onClick={clear} disabled={!params.toString()}>
+            Clear filters
+          </button>
+        </div>
       </div>
       {types.error && (
         <ErrorMessage error={types.error} retry={() => void types.refetch()} />
@@ -167,6 +283,10 @@ export function Catalog({
         />
       ) : (
         <>
+          <p className="catalog-count" aria-live="polite">
+            {catalog.data.total} matching Pokémon
+            {catalog.isFetching ? " · Updating…" : ""}
+          </p>
           <div className="grid">
             {catalog.data.pokemon.map((p) => (
               <PokemonCard
@@ -210,11 +330,18 @@ export function Catalog({
 export function PokemonDetail({
   onSelect,
   back,
+  members,
+  onSpriteChange,
 }: {
   onSelect?: (p: Pokemon) => void;
   back?: string;
+  members?: Pokemon[];
+  onSpriteChange?: (id: number, key: string | null) => void;
 }) {
   const { pokemonId } = useParams();
+  const [selected, setSelected] = useState<string | null>(null);
+  useEffect(() => setSelected(null), [pokemonId]);
+  const member = members?.find((p) => String(p.id) === pokemonId);
   const pokemon = useQuery({
     queryKey: ["pokemon-detail", pokemonId],
     queryFn: ({ signal }) => api.pokemon(pokemonId!, signal),
@@ -231,7 +358,10 @@ export function PokemonDetail({
         retry={() => void pokemon.refetch()}
       />
     );
-  const p = pokemon.data;
+  const p = {
+    ...pokemon.data,
+    selected_sprite: member ? member.selected_sprite : selected,
+  };
   return (
     <section>
       <Link to={back || "/pokemon"}>
@@ -241,14 +371,27 @@ export function PokemonDetail({
         <div>
           <span className="number">#{p.id}</span>
           <Sprite pokemon={p} />
+          <SpritePicker
+            name={p.name}
+            variants={p.sprite_variants || {}}
+            value={p.selected_sprite}
+            onChange={(key) =>
+              member && onSpriteChange
+                ? onSpriteChange(p.id, key)
+                : setSelected(key)
+            }
+          />
           <h1>{p.name}</h1>
           <Types types={p.types} />
+          <PokemonMetadata pokemon={p} />
           <p>
             {p.active
               ? "Available for selection"
               : "Unavailable · existing teams may retain this Pokémon"}
           </p>
-          {onSelect ? (
+          {member ? (
+            <p>On your team · sprite changes stay in your draft until Save.</p>
+          ) : onSelect ? (
             <button disabled={!p.active} onClick={() => onSelect(p)}>
               Add Pokémon to draft
             </button>

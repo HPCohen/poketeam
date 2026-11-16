@@ -12,9 +12,22 @@ export const bulbasaur: Pokemon = {
     special_defense: 65,
     speed: 45,
   },
+  generation: 1,
+  is_starter: true,
+  is_legendary: false,
+  is_mythical: false,
   base_stat_total: 318,
   active: true,
   sprite_url: null,
+  sprite_variants: {
+    front_default: "/api/v1/sprites/front",
+    front_shiny: "https://example.com/shiny.png",
+    "other/official-artwork/front_default": "https://example.com/art.png",
+    "other/showdown/front_default": "https://example.com/animated.gif",
+    "versions/generation-i/red-blue/back_default":
+      "https://example.com/red-back.png",
+  },
+  selected_sprite: null,
 };
 export const charmander: Pokemon = {
   ...bulbasaur,
@@ -54,6 +67,7 @@ export const counter: Counter = {
   ],
 };
 export const catalog = {
+  generations: [1, 2],
   pokemon: [bulbasaur, charmander],
   total: 2,
   limit: 20,
@@ -61,7 +75,7 @@ export const catalog = {
   catalog_revision: 1,
 };
 export const types = {
-  types: ["grass", "poison", "fire", "water"],
+  types: ["grass", "poison", "fire", "water", "flying", "psychic"],
   effectiveness: { fire: { grass: 2, poison: 1 }, water: { fire: 2 } },
   catalog_revision: 1,
 };

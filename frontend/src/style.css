@@ -642,3 +642,119 @@ footer .brand {
     padding: 0 1.2rem;
   }
 }
+
+.sprite.artwork {
+  image-rendering: auto;
+}
+.sprite-picker {
+  margin: 0.8rem 0;
+  text-align: left;
+  min-width: 0;
+}
+.sprite-picker label {
+  font-size: 0.75rem;
+}
+.sprite-picker select {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  font-size: 0.8rem;
+  margin-top: 0.35rem;
+  padding-left: 0.5rem;
+}
+.sprite-help {
+  font-size: 0.75rem;
+  color: #747e82;
+  margin: 0.4rem 0;
+}
+.detail .sprite-picker {
+  max-width: 360px;
+  margin: 0.8rem auto 1.5rem;
+}
+
+.catalog-filters {
+  margin: 1.5rem 0;
+}
+.filter-fields {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr;
+  gap: 1rem;
+}
+.type-filter {
+  border: 0;
+  padding: 0;
+  margin: 1.2rem 0 0.5rem;
+  min-width: 0;
+}
+.type-filter legend {
+  font-size: 0.85rem;
+  font-weight: 650;
+  margin-bottom: 0.65rem;
+}
+.type-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.type-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.65rem;
+  border: 1px solid transparent;
+  cursor: pointer;
+  min-height: 36px;
+}
+.type-choice.checked {
+  border-color: currentColor;
+}
+.type-choice input {
+  appearance: auto;
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  accent-color: #bd303e;
+}
+.type-choice:has(input:disabled) {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.type-choice:focus-within {
+  outline: 3px solid #235cc7;
+  outline-offset: 3px;
+}
+.filter-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+.filter-summary p {
+  font-size: 0.8rem;
+  color: #626e76;
+  margin: 0;
+}
+.pokemon-metadata {
+  font-size: 0.8rem;
+  color: #626e76;
+  margin: 0.8rem 0;
+}
+@media (max-width: 900px) {
+  .filter-fields {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+@media (max-width: 480px) {
+  .filter-fields {
+    grid-template-columns: 1fr;
+    gap: 0.7rem;
+  }
+  .filter-summary {
+    align-items: start;
+    flex-direction: column;
+  }
+}

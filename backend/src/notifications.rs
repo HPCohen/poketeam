@@ -139,6 +139,9 @@ fn describe(name: &str, differences: &Value) -> Vec<String> {
                     }
                 }
             }
+            "sprite_variants" => {
+                descriptions.push(format!("{name}: available sprite versions changed"))
+            }
             "sprite_hash" => descriptions.push(format!("{name}: sprite image content changed")),
             "sprite_source" => descriptions.push(format!("{name}: upstream sprite URL changed")),
             "active" => descriptions.push(format!(

@@ -30,8 +30,19 @@ pub struct Pokemon {
     pub name: String,
     pub types: Vec<String>,
     pub stats: Stats,
+    #[serde(default)]
+    pub generation: Option<i32>,
+    #[serde(default)]
+    pub is_starter: bool,
+    #[serde(default)]
+    pub is_legendary: bool,
+    #[serde(default)]
+    pub is_mythical: bool,
     pub base_stat_total: i32,
     pub sprite_url: Option<String>,
+    #[serde(default)]
+    pub sprite_variants: BTreeMap<String, String>,
+    pub selected_sprite: Option<String>,
     pub active: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -41,23 +52,44 @@ pub struct CatalogPokemon {
     pub name: String,
     pub types: Vec<String>,
     pub stats: Stats,
+    #[serde(default)]
+    pub generation: Option<i32>,
+    #[serde(default)]
+    pub is_starter: bool,
+    #[serde(default)]
+    pub is_legendary: bool,
+    #[serde(default)]
+    pub is_mythical: bool,
     pub sprite_source: Option<String>,
     pub sprite_hash: Option<String>,
+    #[serde(default)]
+    pub sprite_variants: BTreeMap<String, String>,
     pub active: bool,
 }
 impl CatalogPokemon {
     pub fn public(&self) -> Pokemon {
+        let sprite_url = self
+            .sprite_hash
+            .as_ref()
+            .map(|hash| format!("/api/v1/sprites/{hash}"));
+        let mut sprite_variants = self.sprite_variants.clone();
+        if let Some(url) = &sprite_url {
+            sprite_variants.insert("front_default".into(), url.clone());
+        }
         Pokemon {
             id: self.id,
             species_id: self.species_id,
             name: self.name.clone(),
             types: self.types.clone(),
             stats: self.stats.clone(),
+            generation: self.generation,
+            is_starter: self.is_starter,
+            is_legendary: self.is_legendary,
+            is_mythical: self.is_mythical,
             base_stat_total: self.stats.total(),
-            sprite_url: self
-                .sprite_hash
-                .as_ref()
-                .map(|h| format!("/api/v1/sprites/{h}")),
+            sprite_url,
+            sprite_variants,
+            selected_sprite: None,
             active: self.active,
         }
     }
@@ -73,8 +105,15 @@ pub fn from_row(row: &sqlx::postgres::PgRow) -> Result<CatalogPokemon, sqlx::Err
         name: row.try_get("name")?,
         types: row.try_get("types")?,
         stats: stats.0,
+        generation: row.try_get("generation")?,
+        is_starter: row.try_get("is_starter")?,
+        is_legendary: row.try_get("is_legendary")?,
+        is_mythical: row.try_get("is_mythical")?,
         sprite_source: row.try_get("sprite_source")?,
         sprite_hash: row.try_get("sprite_hash")?,
+        sprite_variants: row
+            .try_get::<sqlx::types::Json<BTreeMap<String, String>>, _>("sprite_variants")?
+            .0,
         active: row.try_get("active")?,
     })
 }

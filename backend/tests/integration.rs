@@ -51,6 +51,7 @@ struct Fixture {
     paginate: bool,
     oversized_sprite: bool,
     malformed_json: bool,
+    filter_metadata: bool,
 }
 #[derive(Clone)]
 struct MockState {
@@ -220,7 +221,13 @@ async fn mock_request(State(mock): State<MockState>, request: Request) -> Respon
     let id = pieces.get(3).and_then(|s| s.parse::<i32>().ok());
     let value = match (kind, id) {
         ("pokemon-species", None) => {
-            let n = if f.remove { 7 } else { 8 };
+            let n = if f.remove {
+                7
+            } else if f.filter_metadata {
+                10
+            } else {
+                8
+            };
             let page_two = request.uri().query().is_some_and(|q| q.contains("page=2"));
             let start = if f.paginate && page_two { 5 } else { 1 };
             let end = if f.paginate && !page_two { 4 } else { n };
@@ -230,7 +237,7 @@ async fn mock_request(State(mock): State<MockState>, request: Request) -> Respon
             json!({"count":if f.incomplete {n+1}else{n},"next":if f.paginate && !page_two {Some(format!("{base}/api/v2/pokemon-species?page=2"))} else {None},"results":results})
         }
         ("pokemon-species", Some(i)) => {
-            json!({"id":i,"varieties":[{"is_default":false,"pokemon":resource(base,"pokemon",9999,"alternate")},{"is_default":true,"pokemon":resource(base,"pokemon",if i==1 {if f.default_changed {101}else{100}}else{i},&format!("p{i}"))}]})
+            json!({"id":i,"generation":resource(base,"generation",if f.filter_metadata && i>=5 {2}else{1},"generation"),"is_legendary":f.filter_metadata && i==7,"is_mythical":f.filter_metadata && i==8,"varieties":[{"is_default":false,"pokemon":resource(base,"pokemon",9999,"alternate")},{"is_default":true,"pokemon":resource(base,"pokemon",if i==1 {if f.default_changed {101}else{100}}else{i},&format!("p{i}"))}]})
         }
         ("pokemon", Some(id)) => {
             if f.malformed_json && id == 3 {
@@ -263,9 +270,16 @@ async fn mock_request(State(mock): State<MockState>, request: Request) -> Respon
             let t = if f.all_fields && id == 100 {
                 "water"
             } else {
-                TYPES[(species - 1) as usize]
+                TYPES[(species - 1) as usize % TYPES.len()]
             };
-            json!({"id":id,"name":name,"is_default":true,"species":resource(base,"pokemon-species",species,&format!("species{species}")),"types":[{"slot":1,"type":{"name":t,"url":format!("{base}/type/{t}")}}],"stats":stats,"sprites":{"front_default":if species==2 || (f.null_sprite && species==1) {None}else{Some(format!("{base}/sprites/{}1.png",if f.all_fields {"new"}else{""}))}}})
+            let mut pokemon_types =
+                vec![json!({"slot":1,"type":{"name":t,"url":format!("{base}/type/{t}")}})];
+            if f.filter_metadata && id == 100 {
+                pokemon_types.push(
+                    json!({"slot":2,"type":{"name":"flying","url":format!("{base}/type/flying")}}),
+                );
+            }
+            json!({"id":id,"name":name,"is_default":true,"species":resource(base,"pokemon-species",species,&format!("species{species}")),"types":pokemon_types,"stats":stats,"sprites":{"front_default":if species==2 || (f.null_sprite && species==1) {None}else{Some(format!("{base}/sprites/{}1.png",if f.all_fields {"new"}else{""}))},"front_shiny":format!("{base}/sprites/shiny.png"),"other":{"official-artwork":{"front_default":format!("{base}/sprites/art.png")},"showdown":{"front_default":format!("{base}/sprites/animated.gif")}},"versions":{"generation-i":{"red-blue":{"back_default":format!("{base}/sprites/back.png")}}}}})
         }
         ("type", None) => {
             let page_two = request
@@ -1191,6 +1205,220 @@ async fn database_failure_rolls_back_current_record_only(pool: PgPool) {
     assert_eq!(status["latest_run"]["pokemon_count"], 2);
     assert_eq!(status["latest_run"]["change_count"], 1);
     assert_eq!(status["revision"], 9);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn sprite_metadata_and_per_team_selections(pool: PgPool) {
+    let h = Harness::new(pool).await;
+    h.sync().await.unwrap();
+    let (_, _, pokemon) = h
+        .request("GET", "/api/v1/pokemon/100", None, json!(null))
+        .await;
+    assert_eq!(pokemon["sprite_variants"].as_object().unwrap().len(), 5);
+    assert_eq!(
+        pokemon["sprite_variants"]["front_default"],
+        pokemon["sprite_url"]
+    );
+    assert!(
+        pokemon["sprite_variants"]["other/showdown/front_default"]
+            .as_str()
+            .unwrap()
+            .ends_with("animated.gif")
+    );
+    assert!(pokemon["sprite_variants"]["versions/generation-i/red-blue/back_default"].is_string());
+    assert!(pokemon["selected_sprite"].is_null());
+    assert_eq!(h.mock.sprite_fetches.load(Ordering::SeqCst), 7); // Variants are metadata, not eager image downloads.
+    let owner = h.owner().await;
+    let body = json!({"name":"Shiny team","pokemon_ids":[100,2],"sprite_selections":{"100":"front_shiny","2":"other/official-artwork/front_default"}});
+    let (status, _, team) = h.request("POST", "/api/v1/teams", Some(&owner), body).await;
+    assert_eq!(status, StatusCode::CREATED, "{team}");
+    assert_eq!(team["pokemon"][0]["selected_sprite"], "front_shiny");
+    assert_eq!(
+        team["pokemon"][1]["selected_sprite"],
+        "other/official-artwork/front_default"
+    );
+    let other = h.team(&owner, &[100]).await;
+    assert!(other["pokemon"][0]["selected_sprite"].is_null());
+    let path = format!("/api/v1/teams/{}", team["id"].as_str().unwrap());
+    let update = json!({"name":"Reordered","pokemon_ids":[2,100],"revision":1});
+    let (status, _, reordered) = h.request("PUT", &path, Some(&owner), update).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        reordered["pokemon"][0]["selected_sprite"],
+        "other/official-artwork/front_default"
+    );
+    assert_eq!(reordered["pokemon"][1]["selected_sprite"], "front_shiny");
+    // A stale appearance edit cannot overwrite a newer revision.
+    assert_eq!(h.request("PUT", &path, Some(&owner), json!({"name":"Stale","pokemon_ids":[2,100],"revision":1,"sprite_selections":{"100":"front_default"}})).await.0, StatusCode::CONFLICT);
+    let (_, _, reloaded) = h.request("GET", &path, Some(&owner), json!(null)).await;
+    assert_eq!(reloaded["pokemon"][1]["selected_sprite"], "front_shiny");
+    for selections in [
+        json!({"100":"unknown"}),
+        json!({"3":"front_shiny"}),
+        json!({"100":"https://evil.invalid/image.png"}),
+    ] {
+        let (status, _, _) = h.request("PUT", &path, Some(&owner), json!({"name":"Invalid","pokemon_ids":[2,100],"revision":2,"sprite_selections":selections})).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let other_owner = h.owner().await;
+    assert_eq!(h.request("PUT", &path, Some(&other_owner), json!({"name":"Stolen","pokemon_ids":[2,100],"revision":2,"sprite_selections":{"100":"front_default"}})).await.0, StatusCode::NOT_FOUND);
+    // Preserve an existing choice if the upstream variant disappears.
+    sqlx::query("UPDATE pokemon SET sprite_variants=sprite_variants-'front_shiny' WHERE id=100")
+        .execute(&h.state.pool)
+        .await
+        .unwrap();
+    let (status, _, retained) = h.request("PUT", &path, Some(&owner), json!({"name":"Retained","pokemon_ids":[2,100],"revision":2,"sprite_selections":{"100":"front_shiny"}})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(retained["pokemon"][1]["selected_sprite"], "front_shiny");
+    assert!(
+        retained["pokemon"][1]["sprite_variants"]
+            .get("front_shiny")
+            .is_none()
+    );
+    assert_eq!(h.request("POST", "/api/v1/teams", Some(&owner), json!({"name":"Missing style","pokemon_ids":[100],"sprite_selections":{"100":"front_shiny"}})).await.0, StatusCode::UNPROCESSABLE_ENTITY);
+    let (_, _, reset) = h.request("PUT", &path, Some(&owner), json!({"name":"Default","pokemon_ids":[2,100],"revision":3,"sprite_selections":{"100":"front_default"}})).await;
+    assert!(reset["pokemon"][1]["selected_sprite"].is_null());
+    assert_eq!(
+        reset["pokemon"][0]["selected_sprite"],
+        "other/official-artwork/front_default"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn combined_catalog_filters_and_introduction_metadata(pool: PgPool) {
+    let h = Harness::new(pool).await;
+    h.mock.fixture.lock().unwrap().filter_metadata = true;
+    assert_eq!(h.sync().await.unwrap().pokemon_count, 10);
+    let (_, _, dual) = h
+        .request(
+            "GET",
+            "/api/v1/pokemon?types=fire,flying",
+            None,
+            json!(null),
+        )
+        .await;
+    assert_eq!(dual["total"], 1);
+    assert_eq!(dual["pokemon"][0]["id"], 100);
+    assert_eq!(dual["pokemon"][0]["generation"], 1);
+    assert_eq!(dual["pokemon"][0]["is_starter"], true); // Species 1, despite default-variety ID 100.
+    assert_eq!(dual["generations"], json!([1, 2]));
+    let (_, _, duplicate) = h
+        .request(
+            "GET",
+            "/api/v1/pokemon?types=%20FIRE%20,flying,fire",
+            None,
+            json!(null),
+        )
+        .await;
+    assert_eq!(duplicate["total"], 1);
+    let (_, _, any) = h
+        .request(
+            "GET",
+            "/api/v1/pokemon?types=fire,flying&type_match=any&limit=1&offset=1",
+            None,
+            json!(null),
+        )
+        .await;
+    assert_eq!(any["total"], 3);
+    assert_eq!(any["pokemon"].as_array().unwrap().len(), 1);
+    assert_eq!(any["pokemon"][0]["id"], 9);
+    let (_, _, legacy) = h
+        .request("GET", "/api/v1/pokemon?type=fire", None, json!(null))
+        .await;
+    assert_eq!(legacy["total"], 2);
+    let (_, _, combined) = h
+        .request(
+            "GET",
+            "/api/v1/pokemon?search=P1&types=water&generation=2",
+            None,
+            json!(null),
+        )
+        .await;
+    assert_eq!(combined["total"], 1);
+    assert_eq!(combined["pokemon"][0]["id"], 10);
+    assert_eq!(combined["pokemon"][0]["is_starter"], false);
+    let (_, _, starter) = h
+        .request(
+            "GET",
+            "/api/v1/pokemon?category=starter&generation=2",
+            None,
+            json!(null),
+        )
+        .await;
+    assert_eq!(starter["total"], 5);
+    let (_, _, legendary) = h
+        .request(
+            "GET",
+            "/api/v1/pokemon?category=legendary&generation=2",
+            None,
+            json!(null),
+        )
+        .await;
+    assert_eq!(legendary["total"], 1);
+    assert_eq!(legendary["pokemon"][0]["id"], 7);
+    assert_eq!(legendary["pokemon"][0]["is_mythical"], false);
+    let (_, _, mythical) = h
+        .request(
+            "GET",
+            "/api/v1/pokemon?category=mythical",
+            None,
+            json!(null),
+        )
+        .await;
+    assert_eq!(mythical["total"], 1);
+    assert_eq!(mythical["pokemon"][0]["id"], 8);
+    let (_, _, empty) = h
+        .request(
+            "GET",
+            "/api/v1/pokemon?types=fire,flying&generation=2&category=legendary",
+            None,
+            json!(null),
+        )
+        .await;
+    assert_eq!(empty["total"], 0);
+    assert_eq!(empty["generations"], json!([1, 2]));
+    for query in [
+        "types=unknown",
+        "types=fire,water,grass",
+        "generation=0",
+        "generation=-1",
+    ] {
+        assert_eq!(
+            h.request(
+                "GET",
+                &format!("/api/v1/pokemon?{query}"),
+                None,
+                json!(null)
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{query}"
+        );
+    }
+    for query in ["type_match=both", "category=rare", "generation=abc"] {
+        assert_eq!(
+            h.request(
+                "GET",
+                &format!("/api/v1/pokemon?{query}"),
+                None,
+                json!(null)
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST,
+            "{query}"
+        );
+    }
+    let (_, _, many_any) = h
+        .request(
+            "GET",
+            "/api/v1/pokemon?types=fire,water,grass&type_match=any",
+            None,
+            json!(null),
+        )
+        .await;
+    assert!(many_any["total"].as_i64().unwrap() > 0);
 }
 
 struct PausedUpstream {

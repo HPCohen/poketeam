@@ -265,7 +265,13 @@ mod tests {
                 speed: stat,
             },
             base_stat_total: stat * 6,
+            generation: None,
+            is_starter: false,
+            is_legendary: false,
+            is_mythical: false,
             sprite_url: None,
+            sprite_variants: Default::default(),
+            selected_sprite: None,
             active: true,
         }
     }
@@ -358,7 +364,13 @@ mod scoring_tests {
                 speed: stat,
             },
             base_stat_total: 6 * stat,
+            generation: None,
+            is_starter: false,
+            is_legendary: false,
+            is_mythical: false,
             sprite_url: None,
+            sprite_variants: Default::default(),
+            selected_sprite: None,
             active: true,
         }
     }

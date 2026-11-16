@@ -13,7 +13,7 @@ curl http://localhost:3000/health/ready
 
 **Design.** Explicit SQL, a single crate, and no broker or distributed cache keep the architecture small. Each sync follows paginated resource lists and fetches details sequentially with reqwest’s JSON decoder. It saves the type chart first, then commits each Pokémon with its sprite and change event before fetching the next. An advisory lock prevents overlapping scans. Failures retain already committed records; missing Pokémon are marked unavailable only after a complete scan; the worker retries after 15 minutes and normally refreshes 24 hours after success. PostgreSQL stores small sprites so each image and Pokémon row commit together.
 
-**Ownership and teams.** `POST /api/v1/session` with `{}` establishes a persistent anonymous HttpOnly cookie. Same-origin JSON mutations require an exact `Origin` match. HTTPS origins enable Secure cookies. Teams have zero to six distinct, ordered members and optimistic revisions; ownership is enforced in SQL. Clearing the cookie loses access. Accounts and cross-device recovery are outside v1.
+**Ownership and teams.** `POST /api/v1/session` with `{}` establishes a persistent anonymous HttpOnly cookie. Same-origin JSON mutations require an exact `Origin` match. HTTPS origins enable Secure cookies. Teams have zero to six distinct, ordered members, per-member sprite choices, and optimistic revisions; ownership is enforced in SQL. Clearing the cookie loses access. Accounts and cross-device recovery are outside v1.
 
 **Counter teams.** Power mode prioritizes coverage, then total base stats, then matchup score. Rival mode preserves total stats within ±5% and prioritizes coverage and matchup score. Both are deterministic greedy/local-search heuristics capped at ten improvement passes. Own-type attacks multiply effectiveness across defender types; shared weaknesses incur a penalty. Moves, abilities, items, levels, and battle outcomes are outside the model. Rival search failure means the heuristic found no qualifying seed, not that none exists.
 
@@ -35,3 +35,7 @@ For AWS hosting, see [AWS CLI deployment scripts](aws/README.md) for a single-ho
 ## Frontend
 
 Run `cd frontend && npm ci && npm run dev`, then open **http://127.0.0.1:5173**. Set the backend’s `PUBLIC_ORIGIN=http://127.0.0.1:5173` to match that exact browser origin. Vite proxies API requests to port 3000. `npm run build` produces `frontend/dist` for the existing AWS deployment scripts. See [frontend setup and checks](frontend/README.md) and [implementation record](plans/frontend.md).
+
+Sprite selectors expose all non-null versions supplied for each catalog Pokémon, including shiny, game-version, artwork and animated images. Choices are saved per team member. Additional variants load from upstream URLs on demand; the default sprite remains cached locally.
+
+Search combines multiple types (All/Any), introduction generation and separate Starter families, Legendary or Mythical groups. Starter results include full evolution families, including Pikachu and Eevee relatives. The same filters are available while building a team.

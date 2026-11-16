@@ -176,6 +176,7 @@ export interface components {
         CatalogPage: {
             /** Format: int64 */
             catalog_revision: number;
+            generations: number[];
             /** Format: int32 */
             limit: number;
             /** Format: int32 */
@@ -191,6 +192,8 @@ export interface components {
             /** Format: int64 */
             revision: number;
         };
+        /** @enum {string} */
+        Category: "starter" | "legendary" | "mythical";
         CounterRequest: {
             mode?: components["schemas"]["Mode"];
         };
@@ -219,6 +222,9 @@ export interface components {
         CreateTeam: {
             name: string;
             pokemon_ids?: number[];
+            sprite_selections?: {
+                [key: string]: string;
+            };
         };
         ErrorBody: {
             code: string;
@@ -260,11 +266,20 @@ export interface components {
             /** Format: int32 */
             base_stat_total: number;
             /** Format: int32 */
+            generation?: number | null;
+            /** Format: int32 */
             id: number;
+            is_legendary?: boolean;
+            is_mythical?: boolean;
+            is_starter?: boolean;
             name: string;
+            selected_sprite?: string | null;
             /** Format: int32 */
             species_id: number;
             sprite_url?: string | null;
+            sprite_variants?: {
+                [key: string]: string;
+            };
             stats: components["schemas"]["Stats"];
             types: string[];
         };
@@ -316,6 +331,8 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
+        /** @enum {string} */
+        TypeMatch: "all" | "any";
         TypeResponse: {
             /** Format: int64 */
             catalog_revision: number;
@@ -327,6 +344,9 @@ export interface components {
             pokemon_ids: number[];
             /** Format: int64 */
             revision: number;
+            sprite_selections?: {
+                [key: string]: string;
+            };
         };
     };
     responses: never;
@@ -425,6 +445,10 @@ export interface operations {
                 offset?: number;
                 search?: string;
                 type?: string;
+                types?: string;
+                type_match?: components["schemas"]["TypeMatch"];
+                generation?: number;
+                category?: components["schemas"]["Category"];
             };
             header?: never;
             path?: never;
@@ -445,6 +469,22 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
             };
             503: {
                 headers: {

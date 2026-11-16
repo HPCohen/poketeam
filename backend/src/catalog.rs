@@ -67,6 +67,29 @@ fn cached<T: Serialize>(headers: &HeaderMap, key: &str, value: T) -> ApiResult<R
     );
     Ok(response)
 }
+#[derive(Default, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TypeMatch {
+    #[default]
+    All,
+    Any,
+}
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Category {
+    Starter,
+    Legendary,
+    Mythical,
+}
+impl Category {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Starter => "starter",
+            Self::Legendary => "legendary",
+            Self::Mythical => "mythical",
+        }
+    }
+}
 #[derive(Deserialize)]
 pub struct CatalogQuery {
     #[serde(default = "page_size")]
@@ -76,6 +99,11 @@ pub struct CatalogQuery {
     search: Option<String>,
     #[serde(rename = "type")]
     kind: Option<String>,
+    types: Option<String>,
+    #[serde(default)]
+    type_match: TypeMatch,
+    generation: Option<i32>,
+    category: Option<Category>,
 }
 pub(crate) fn page_size() -> u32 {
     60
@@ -95,8 +123,9 @@ pub struct CatalogPage {
     pub limit: u32,
     pub offset: u32,
     pub catalog_revision: i64,
+    pub generations: Vec<i32>,
 }
-#[utoipa::path(get,path="/api/v1/pokemon",params(("limit"=Option<u32>,Query),("offset"=Option<u32>,Query),("search"=Option<String>,Query),("type"=Option<String>,Query)),responses((status=200,body=CatalogPage),(status=304),(status=503,body=ErrorBody)),tag="catalog")]
+#[utoipa::path(get,path="/api/v1/pokemon",params(("limit"=Option<u32>,Query),("offset"=Option<u32>,Query),("search"=Option<String>,Query),("type"=Option<String>,Query),("types"=Option<String>,Query),("type_match"=Option<TypeMatch>,Query),("generation"=Option<i32>,Query),("category"=Option<Category>,Query)),responses((status=200,body=CatalogPage),(status=304),(status=400,body=ErrorBody),(status=422,body=ErrorBody),(status=503,body=ErrorBody)),tag="catalog")]
 pub(crate) async fn catalog(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -106,26 +135,54 @@ pub(crate) async fn catalog(
     let mut tx = snapshot(&state).await?;
     let rev = revision(&mut tx).await?;
     let search = q.search.unwrap_or_default().to_lowercase();
-    let kind = q.kind.map(|s| s.to_lowercase());
-    let total:i64=sqlx::query_scalar("SELECT count(*) FROM pokemon WHERE active AND strpos(lower(name),$1)>0 AND ($2::text IS NULL OR $2=ANY(types))").bind(&search).bind(&kind).fetch_one(&mut *tx).await?;
-    let rows = sqlx::query(
-        r#"
-        SELECT *
-        FROM pokemon
-        WHERE active
-        AND strpos(lower(name),$1)>0
-        AND ($2::text IS NULL OR $2=ANY(types))
-        ORDER BY id
-        LIMIT $3
-        OFFSET $4
-        "#,
-    )
-    .bind(search)
-    .bind(kind)
-    .bind(i64::from(q.limit))
-    .bind(i64::from(q.offset))
-    .fetch_all(&mut *tx)
-    .await?;
+    let selected_types: Vec<String> = q
+        .types
+        .or(q.kind)
+        .unwrap_or_default()
+        .split(',')
+        .map(|kind| kind.trim().to_lowercase())
+        .filter(|kind| !kind.is_empty())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let any_type = matches!(q.type_match, TypeMatch::Any);
+    if !any_type && selected_types.len() > 2 {
+        return Err(ApiError::invalid(
+            "Match all supports at most two types; use Match any for more",
+        ));
+    }
+    if q.generation.is_some_and(|generation| generation <= 0) {
+        return Err(ApiError::invalid("Generation must be a positive integer"));
+    }
+    let available_types: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT attacking FROM type_effectiveness")
+            .fetch_all(&mut *tx)
+            .await?;
+    if selected_types
+        .iter()
+        .any(|kind| !available_types.contains(kind))
+    {
+        return Err(ApiError::invalid("Unknown Pokémon type"));
+    }
+    let generations = sqlx::query_scalar("SELECT DISTINCT generation FROM pokemon WHERE active AND generation IS NOT NULL ORDER BY generation")
+        .fetch_all(&mut *tx).await?;
+    let category = q.category.as_ref().map(Category::name);
+    let total: i64 = sqlx::query_scalar(r#"
+        SELECT count(*) FROM pokemon
+        WHERE active AND strpos(lower(name),$1)>0
+          AND (cardinality($2::text[])=0 OR CASE WHEN $3 THEN types && $2 ELSE types @> $2 END)
+          AND ($4::integer IS NULL OR generation=$4)
+          AND ($5::text IS NULL OR ($5='starter' AND is_starter) OR ($5='legendary' AND is_legendary) OR ($5='mythical' AND is_mythical))
+        "#).bind(&search).bind(&selected_types).bind(any_type).bind(q.generation).bind(category).fetch_one(&mut *tx).await?;
+    let rows = sqlx::query(r#"
+        SELECT * FROM pokemon
+        WHERE active AND strpos(lower(name),$1)>0
+          AND (cardinality($2::text[])=0 OR CASE WHEN $3 THEN types && $2 ELSE types @> $2 END)
+          AND ($4::integer IS NULL OR generation=$4)
+          AND ($5::text IS NULL OR ($5='starter' AND is_starter) OR ($5='legendary' AND is_legendary) OR ($5='mythical' AND is_mythical))
+        ORDER BY id LIMIT $6 OFFSET $7
+        "#).bind(&search).bind(&selected_types).bind(any_type).bind(q.generation).bind(category)
+        .bind(i64::from(q.limit)).bind(i64::from(q.offset)).fetch_all(&mut *tx).await?;
     let pokemon = rows
         .iter()
         .map(model::from_row)
@@ -140,6 +197,7 @@ pub(crate) async fn catalog(
             limit: q.limit,
             offset: q.offset,
             catalog_revision: rev,
+            generations,
         },
     )
 }

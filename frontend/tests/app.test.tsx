@@ -1,11 +1,17 @@
 import { QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createClient, routes } from "../src/App";
 import { api, ApiError, onUnauthorized, request } from "../src/api/client";
-import { validateTeam } from "../src/shared";
+import { Sprite, validateTeam } from "../src/shared";
 import {
   bulbasaur,
   catalog,
@@ -18,6 +24,7 @@ let identity = true;
 let conflict = false;
 let expired = false;
 let unavailable = false;
+let storedTeam: typeof team;
 let calls: { path: string; method: string; body: any }[];
 beforeEach(() => {
   identity = true;
@@ -25,6 +32,7 @@ beforeEach(() => {
   expired = false;
   unavailable = false;
   calls = [];
+  storedTeam = { ...team, pokemon: team.pokemon.map((p) => ({ ...p })) };
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: string, init?: RequestInit) => {
@@ -50,28 +58,42 @@ beforeEach(() => {
           { code: "identity_required", message: "Session expired" },
           401,
         );
-      if (path === "/teams" && method === "GET") return response([team]);
+      if (path === "/teams" && method === "GET") return response([storedTeam]);
       if (path === "/teams" && method === "POST")
         return response(
           { ...team, id: "new-team", name: body.name, pokemon: [charmander] },
           201,
         );
       if (path.endsWith("/counter-team")) return response(counter);
-      if (path.startsWith("/teams/") && method === "PUT")
-        return conflict
-          ? response(
-              { code: "revision_conflict", message: "Newer revision exists" },
-              409,
-            )
-          : response({ ...team, name: body.name, revision: 8 });
+      if (path.startsWith("/teams/") && method === "PUT") {
+        if (conflict)
+          return response(
+            { code: "revision_conflict", message: "Newer revision exists" },
+            409,
+          );
+        storedTeam = {
+          ...storedTeam,
+          name: body.name,
+          revision: 8,
+          pokemon: body.pokemon_ids.map((id: number) => {
+            const p = team.pokemon.find((p) => p.id === id)!;
+            const key = body.sprite_selections?.[String(id)];
+            return {
+              ...p,
+              selected_sprite: !key || key === "front_default" ? null : key,
+            };
+          }),
+        };
+        return response(storedTeam);
+      }
       if (path.startsWith("/teams/") && method === "DELETE")
         return response(null, 204);
       if (path.startsWith("/teams/"))
         return response({
-          ...team,
+          ...storedTeam,
           pokemon: unavailable
             ? [{ ...bulbasaur, active: false }, charmander]
-            : team.pokemon,
+            : storedTeam.pokemon,
         });
       if (path === "/types") return response(types);
       if (path.startsWith("/pokemon?")) return response(catalog);
@@ -181,6 +203,7 @@ describe("team drafts", () => {
     expect(calls.find((c) => c.method === "PUT")?.body).toEqual({
       name: "Favorites",
       pokemon_ids: [4, 1],
+      sprite_selections: { "1": "front_default", "4": "front_default" },
       revision: 7,
     });
   });
@@ -303,4 +326,189 @@ it("warns before closing with an unsaved draft", async () => {
   const event = new Event("beforeunload", { cancelable: true });
   window.dispatchEvent(event);
   expect(event.defaultPrevented).toBe(true);
+});
+
+it("treats sprite edits as drafts and preserves them through details, reorder and conflicts", async () => {
+  const { user } = mount("/teams/team-1");
+  const picker = await screen.findByRole("combobox", {
+    name: "Sprite for bulbasaur",
+  });
+  await user.selectOptions(picker, "front_shiny");
+  expect(screen.getByRole("status")).toHaveTextContent("Unsaved draft");
+  await user.click(screen.getAllByRole("link", { name: /bulbasaur/ })[0]);
+  await screen.findByRole("heading", { name: "Base stats" });
+  for (const picker of screen.getAllByRole("combobox", {
+    name: "Sprite for bulbasaur",
+  }))
+    expect(picker).toHaveValue("front_shiny");
+  await user.click(screen.getByRole("link", { name: /Back to draft/ }));
+  await user.click(
+    screen.getByRole("button", { name: "Move bulbasaur right" }),
+  );
+  conflict = true;
+  await user.click(screen.getByRole("button", { name: "Save team" }));
+  await screen.findByText("Newer revision exists");
+  expect(
+    screen.getByRole("combobox", { name: "Sprite for bulbasaur" }),
+  ).toHaveValue("front_shiny");
+  expect(calls.find((call) => call.method === "PUT")?.body).toMatchObject({
+    pokemon_ids: [4, 1],
+    sprite_selections: { "1": "front_shiny", "4": "front_default" },
+    revision: 7,
+  });
+  await user.click(
+    screen.getByRole("button", { name: "Discard draft and reload latest" }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("combobox", { name: "Sprite for bulbasaur" }),
+    ).toHaveValue("front_default"),
+  );
+});
+it("saves sprite-only changes and clears the dirty state", async () => {
+  const { user } = mount("/teams/team-1");
+  await user.selectOptions(
+    await screen.findByRole("combobox", { name: "Sprite for bulbasaur" }),
+    "other/official-artwork/front_default",
+  );
+  await user.click(screen.getByRole("button", { name: "Save team" }));
+  await screen.findByText("Team saved.");
+  expect(
+    screen.getByRole("combobox", { name: "Sprite for bulbasaur" }),
+  ).toHaveValue("other/official-artwork/front_default");
+  const event = new Event("beforeunload", { cancelable: true });
+  window.dispatchEvent(event);
+  expect(event.defaultPrevented).toBe(false);
+});
+it("stages the viewer's chosen animated sprite when starting a new team", async () => {
+  const { user } = mount("/pokemon/1");
+  await user.selectOptions(
+    await screen.findByRole("combobox", { name: "Sprite for bulbasaur" }),
+    "other/showdown/front_default",
+  );
+  expect(screen.getByRole("img", { name: "bulbasaur" })).toHaveAttribute(
+    "src",
+    "https://example.com/animated.gif",
+  );
+  await user.click(screen.getByRole("button", { name: "Add to team" }));
+  await user.click(screen.getByRole("button", { name: "Start new draft" }));
+  expect(
+    await screen.findByRole("combobox", { name: "Sprite for bulbasaur" }),
+  ).toHaveValue("other/showdown/front_default");
+  await user.type(screen.getByLabelText("Team name"), "Animated team");
+  await user.click(screen.getByRole("button", { name: "Save team" }));
+  await waitFor(() =>
+    expect(
+      calls.find((call) => call.path === "/teams" && call.method === "POST")
+        ?.body.sprite_selections,
+    ).toEqual({ "1": "other/showdown/front_default" }),
+  );
+});
+it("falls back on broken or removed sprites and retries a newly selected URL", () => {
+  const p = {
+    ...bulbasaur,
+    sprite_url: "/default.png",
+    selected_sprite: "front_shiny",
+  };
+  const { rerender } = render(<Sprite pokemon={p} />);
+  fireEvent.error(screen.getByRole("img"));
+  expect(screen.getByRole("img")).toHaveAttribute("src", "/default.png");
+  rerender(
+    <Sprite
+      pokemon={{
+        ...p,
+        selected_sprite: "other/official-artwork/front_default",
+      }}
+    />,
+  );
+  expect(screen.getByRole("img")).toHaveAttribute(
+    "src",
+    "https://example.com/art.png",
+  );
+  fireEvent.error(screen.getByRole("img"));
+  fireEvent.error(screen.getByRole("img"));
+  expect(screen.getByRole("img")).toHaveAttribute(
+    "aria-label",
+    "bulbasaur image unavailable",
+  );
+  rerender(<Sprite pokemon={{ ...p, selected_sprite: "removed" }} />);
+  expect(screen.getByRole("img")).toHaveAttribute("src", "/default.png");
+});
+
+it("keeps advanced filters in the URL, combines them, and preserves them during pagination", async () => {
+  const original = vi.mocked(fetch).getMockImplementation()!;
+  vi.mocked(fetch).mockImplementation(async (input, init) =>
+    String(input).startsWith("/api/v1/pokemon?")
+      ? new Response(JSON.stringify({ ...catalog, total: 45 }))
+      : original(input, init),
+  );
+  const { user, router } = mount(
+    "/pokemon?types=grass,poison&generation=1&category=starter&offset=20",
+  );
+  expect(
+    await screen.findByRole("checkbox", { name: "Grass type" }),
+  ).toBeChecked();
+  expect(screen.getByRole("checkbox", { name: "Poison type" })).toBeChecked();
+  expect(screen.getByRole("checkbox", { name: "Fire type" })).toBeDisabled();
+  expect(screen.getByRole("combobox", { name: "Introduced in" })).toHaveValue(
+    "1",
+  );
+  expect(screen.getByRole("combobox", { name: "Pokémon group" })).toHaveValue(
+    "starter",
+  );
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "Type matching" }),
+    "any",
+  );
+  expect(new URLSearchParams(router.state.location.search).has("offset")).toBe(
+    false,
+  );
+  expect(screen.getByRole("checkbox", { name: "Fire type" })).toBeEnabled();
+  await user.click(screen.getByRole("checkbox", { name: "Fire type" }));
+  expect(
+    screen.getByRole("option", { name: "All selected types" }),
+  ).toBeDisabled();
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "Introduced in" }),
+    "2",
+  );
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "Pokémon group" }),
+    "legendary",
+  );
+  await user.type(screen.getByRole("searchbox"), "mew");
+  await waitFor(() =>
+    expect(
+      new URLSearchParams(router.state.location.search).get("search"),
+    ).toBe("mew"),
+  );
+  await user.click(await screen.findByRole("button", { name: "Next" }));
+  const params = new URLSearchParams(router.state.location.search);
+  expect(params.get("types")).toBe("fire,grass,poison");
+  expect(params.get("type_match")).toBe("any");
+  expect(params.get("generation")).toBe("2");
+  expect(params.get("category")).toBe("legendary");
+  expect(params.get("offset")).toBe("20");
+  await user.click(screen.getByRole("button", { name: "Clear filters" }));
+  expect(router.state.location.search).toBe("");
+  expect(screen.getByRole("searchbox")).toHaveValue("");
+  expect(
+    screen.getByRole("checkbox", { name: "Grass type" }),
+  ).not.toBeChecked();
+});
+it("supports legacy type bookmarks and preserves editor drafts while filtering", async () => {
+  const { user, router } = mount("/teams/team-1?type=fire");
+  await user.type(await screen.findByLabelText("Team name"), " draft");
+  expect(
+    await screen.findByRole("checkbox", { name: "Fire type" }),
+  ).toBeChecked();
+  await user.click(screen.getByRole("checkbox", { name: "Flying type" }));
+  expect(new URLSearchParams(router.state.location.search).get("types")).toBe(
+    "fire,flying",
+  );
+  expect(new URLSearchParams(router.state.location.search).has("type")).toBe(
+    false,
+  );
+  expect(screen.getByLabelText("Team name")).toHaveValue("Favorites draft");
+  expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
 });

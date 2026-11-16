@@ -30,7 +30,7 @@ await api(`/teams/${team.id}`, 'DELETE', {});
 | Method/path (relative to `/api/v1`) | Input and result |
 | --- | --- |
 | POST `/session` | `{}` → `{owner_id}` and rolling one-year cookie |
-| GET `/pokemon` | `limit=60` (1–200), `offset=0`, optional `search` (literal case-insensitive substring), `type` (exact type name) → `{pokemon,total,limit,offset,catalog_revision}`; active only, ascending IDs |
+| GET `/pokemon` | `limit=60` (1–200), `offset=0`, optional `search` (literal case-insensitive substring), `type` (legacy exact type), `types`, `type_match`, `generation`, `category` (see below) → `{pokemon,total,limit,offset,catalog_revision,generations}`; active only, ascending IDs |
 | GET `/pokemon/{id}` | Pokémon, including retained inactive records |
 | GET `/types` | `{types,effectiveness,catalog_revision}`; effectiveness maps attacker → defender → multiplier |
 | GET `/sprites/{hash}` | Image bytes with `public, max-age=31536000, immutable` |
@@ -56,3 +56,19 @@ Errors use `{code,message,details?}`: `400` malformed JSON/query/path, invalid O
 For local frontend development, set `PUBLIC_ORIGIN=http://127.0.0.1:5173` and open that exact Vite URL. Proxy requests retain the browser Origin for backend validation. The shared typed frontend helper is `frontend/src/api/client.ts`. It clears private data on 401 and never replays mutations; a 409 preserves editor drafts until explicit discard/reload.
 
 Sync status counts processed Pokémon as they commit, including for running/failed scans. `last_success_at` records the last fully completed scan. Failed scans retain earlier committed rows and alerts; missing Pokémon become unavailable only after a complete scan. Initial-import alerts remain silent until the first fully completed scan.
+
+## Sprite versions
+
+Each Pokémon now includes `sprite_variants`, a map from stable upstream paths to image URLs, and nullable `selected_sprite` (set for saved team members). Paths include `front_shiny`, `back_default`, `other/official-artwork/front_default`, and `versions/generation-i/red-blue/back_default`. Only non-null image URLs are offered. Nested SVG artwork and animated GIF variants are included. These are appearances for the existing catalog Pokémon; they do not change its form/stats.
+
+The default image stays cached at the immutable local `sprite_url`; its `front_default` map entry points there. Other map entries reference the upstream image and load directly in the browser when selected. Sync records the URLs and does not eagerly download every image. Default sprite byte changes are detected as before; additional variant content is not downloaded/hashed, so those images produce change alerts when their metadata URLs change.
+
+Team creation/update accepts optional `sprite_selections`, keyed by Pokémon ID string, with each value taken from that Pokémon's map. For example, `{ "name": "Shiny favorites", "pokemon_ids": [25,6], "sprite_selections": {"25":"front_shiny"} }`. On update also send the loaded `revision`. Omitted entries preserve a retained member's existing choice; explicit `front_default` resets it. Selections must belong to the submitted roster and exist in its metadata, except an existing saved selection can be retained if upstream removes it. Each team stores its own choice independently. The UI falls back to the default image for missing/broken variants; appearance changes participate in the same explicit Save/conflict flow as roster edits.
+
+## Catalog filters
+
+`GET /api/v1/pokemon?types=fire,flying&type_match=all&generation=1&category=starter` returns Charizard. `types` accepts comma-separated type names (case-insensitive, trimmed and deduplicated). `type_match=all` is the default and requires every selected type, with at most two distinct types. `type_match=any` matches at least one selected type. The legacy `type=fire` still works; `types` takes precedence when supplied.
+
+`generation` is a positive introduction-generation number from species metadata, independent of sprite version. `category` is one of `starter`, `legendary`, or `mythical`; Legendary and Mythical remain separate. Starter families include the nine generations' main first-partner evolution lines, Pichu/Pikachu/Raichu, and Eevee with all its evolutions. This explicit species list needs updating if new starter families are introduced. Name, type, generation and category filters combine with AND. Pagination applies after filtering, and `total` counts all matches. `generations` contains all available imported introduction generations, independent of filters.
+
+Pokémon include nullable `generation` and boolean `is_starter`, `is_legendary`, `is_mythical`. Existing rows have unknown generation and false flags until refreshed. Introduction generation and Legendary/Mythical status come from [PokéAPI species metadata](https://pokeapi.co/docs/v2#pokemon-species); starter membership is defined by the application. Invalid enum/integer syntax returns 400; unknown types, nonpositive generations and more than two types in All mode return 422.

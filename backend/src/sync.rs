@@ -177,6 +177,8 @@ impl PokeApi {
             species.id > 0 && species.id == resource.id()?,
             "species identity mismatch"
         );
+        let generation = species.generation.id()?;
+        ensure!(generation > 0, "invalid introduction generation");
         let mut defaults = species
             .varieties
             .into_iter()
@@ -192,6 +194,13 @@ impl PokeApi {
             "default variety/species mismatch"
         );
         let mut row = CatalogPokemon::try_from(raw)?;
+        row.generation = Some(generation);
+        row.is_starter = pokeapi::is_starter_family(species.id);
+        row.is_legendary = species.is_legendary;
+        row.is_mythical = species.is_mythical;
+        for url in row.sprite_variants.values() {
+            validate_url(&self.config, &Url::parse(url)?)?;
+        }
         let asset = if let Some(url) = &row.sprite_source {
             let asset = self.sprite(Url::parse(url)?).await?;
             row.sprite_hash = Some(hex::encode(Sha256::digest(&asset.bytes)));
@@ -528,9 +537,9 @@ async fn write_pokemon(
     let mut diff = differences(before.as_ref(), pokemon)?;
     let changed = !diff.is_empty();
     sqlx::query(r#"
-        INSERT INTO pokemon(id,species_id,name,types,stats,sprite_source,sprite_hash,active) VALUES($1,$2,$3,$4,$5,$6,$7,$8)
-        ON CONFLICT(id) DO UPDATE SET species_id=excluded.species_id,name=excluded.name,types=excluded.types,stats=excluded.stats,sprite_source=excluded.sprite_source,sprite_hash=excluded.sprite_hash,active=excluded.active
-        "#).bind(pokemon.id).bind(pokemon.species_id).bind(&pokemon.name).bind(&pokemon.types).bind(sqlx::types::Json(&pokemon.stats)).bind(&pokemon.sprite_source).bind(&pokemon.sprite_hash).bind(pokemon.active).execute(&mut *conn).await?;
+        INSERT INTO pokemon(id,species_id,name,types,stats,sprite_source,sprite_hash,active,sprite_variants,generation,is_starter,is_legendary,is_mythical) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        ON CONFLICT(id) DO UPDATE SET species_id=excluded.species_id,name=excluded.name,types=excluded.types,stats=excluded.stats,sprite_source=excluded.sprite_source,sprite_hash=excluded.sprite_hash,active=excluded.active,sprite_variants=excluded.sprite_variants,generation=excluded.generation,is_starter=excluded.is_starter,is_legendary=excluded.is_legendary,is_mythical=excluded.is_mythical
+        "#).bind(pokemon.id).bind(pokemon.species_id).bind(&pokemon.name).bind(&pokemon.types).bind(sqlx::types::Json(&pokemon.stats)).bind(&pokemon.sprite_source).bind(&pokemon.sprite_hash).bind(pokemon.active).bind(sqlx::types::Json(&pokemon.sprite_variants)).bind(pokemon.generation).bind(pokemon.is_starter).bind(pokemon.is_legendary).bind(pokemon.is_mythical).execute(&mut *conn).await?;
     if initialized {
         let relevant = related_changes(pokemon, before.as_ref(), chart_changes);
         if !relevant.is_empty() {

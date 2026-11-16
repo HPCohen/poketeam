@@ -1,6 +1,9 @@
 use crate::{
     AppState,
-    catalog::{self, CatalogPage, CatalogStatus, RefreshRun, TypeResponse, unavailable},
+    catalog::{
+        self, CatalogPage, CatalogStatus, Category, RefreshRun, TypeMatch, TypeResponse,
+        unavailable,
+    },
     counters::{CounterResult, Mode},
     identity::{self, Session, cookie, token},
     model::{Pokemon, Stats},
@@ -238,7 +241,7 @@ impl utoipa::Modify for CookieSecurity {
     }
 }
 #[derive(OpenApi)]
-#[openapi(info(title="Poketeam API",version="1.0.0",description="Same-origin JSON REST API. All mutations require Origin matching PUBLIC_ORIGIN and Content-Type application/json. Establish identity with POST /api/v1/session and send the HttpOnly cookie on subsequent requests. DELETE accepts {}. Errors use {code,message,details?}. Counter search uses deterministic heuristics, not battle simulation."),paths(identity::session,catalog::catalog,catalog::pokemon,catalog::types,catalog::sprite,catalog::status,teams::teams,teams::create_team,teams::team,teams::update_team,teams::delete_team,teams::counter_team,notifications::notifications),components(schemas(Stats,Pokemon,Session,ErrorBody,CatalogPage,TypeResponse,CatalogStatus,RefreshRun,Team,CreateTeam,UpdateTeam,CounterRequest,CounterResult,Mode,Notification,NotificationPage)),modifiers(&CookieSecurity))]
+#[openapi(info(title="Poketeam API",version="1.0.0",description="Same-origin JSON REST API. All mutations require Origin matching PUBLIC_ORIGIN and Content-Type application/json. Establish identity with POST /api/v1/session and send the HttpOnly cookie on subsequent requests. DELETE accepts {}. Errors use {code,message,details?}. Counter search uses deterministic heuristics, not battle simulation."),paths(identity::session,catalog::catalog,catalog::pokemon,catalog::types,catalog::sprite,catalog::status,teams::teams,teams::create_team,teams::team,teams::update_team,teams::delete_team,teams::counter_team,notifications::notifications),components(schemas(Stats,Pokemon,Session,ErrorBody,CatalogPage,TypeMatch,Category,TypeResponse,CatalogStatus,RefreshRun,Team,CreateTeam,UpdateTeam,CounterRequest,CounterResult,Mode,Notification,NotificationPage)),modifiers(&CookieSecurity))]
 pub struct ApiDoc;
 async fn openapi() -> Json<utoipa::openapi::OpenApi> {
     Json(ApiDoc::openapi())

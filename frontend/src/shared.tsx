@@ -26,19 +26,48 @@ export function Loading() {
   return <p role="status">Loading…</p>;
 }
 export function Sprite({ pokemon }: { pokemon: Pokemon }) {
-  const [failed, setFailed] = useState(false);
-  return pokemon.sprite_url && !failed ? (
+  const selected = pokemon.selected_sprite;
+  const url =
+    (selected && pokemon.sprite_variants?.[selected]) || pokemon.sprite_url;
+  const artwork =
+    !!selected?.startsWith("other/") && !selected.includes("showdown");
+  return (
+    <SpriteImage
+      key={`${pokemon.id}:${url}`}
+      name={pokemon.name}
+      url={url}
+      fallback={pokemon.sprite_url}
+      artwork={artwork}
+    />
+  );
+}
+function SpriteImage({
+  name,
+  url,
+  fallback,
+  artwork,
+}: {
+  name: string;
+  url?: string | null;
+  fallback?: string | null;
+  artwork: boolean;
+}) {
+  const [failed, setFailed] = useState<string[]>([]);
+  const source = [url, fallback].find(
+    (value) => value && !failed.includes(value),
+  );
+  return source ? (
     <img
-      className="sprite"
-      src={pokemon.sprite_url}
-      alt={pokemon.name}
-      onError={() => setFailed(true)}
+      className={`sprite${artwork ? " artwork" : ""}`}
+      src={source}
+      alt={name}
+      onError={() => setFailed((previous) => [...previous, source])}
     />
   ) : (
     <span
       className="sprite fallback"
       role="img"
-      aria-label={`${pokemon.name} image unavailable`}
+      aria-label={`${name} image unavailable`}
     >
       ?
     </span>
@@ -54,6 +83,26 @@ export function Types({ types }: { types: string[] }) {
       ))}
     </span>
   );
+}
+export function generationLabel(generation: number) {
+  return (
+    ["", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"][
+      generation
+    ] || String(generation)
+  );
+}
+export function PokemonMetadata({ pokemon }: { pokemon: Pokemon }) {
+  const labels = [
+    pokemon.generation
+      ? `Generation ${generationLabel(pokemon.generation)}`
+      : null,
+    pokemon.is_starter ? "Starter family" : null,
+    pokemon.is_legendary ? "Legendary" : null,
+    pokemon.is_mythical ? "Mythical" : null,
+  ].filter(Boolean);
+  return labels.length ? (
+    <p className="pokemon-metadata">{labels.join(" · ")}</p>
+  ) : null;
 }
 export function PokemonCard({
   pokemon,
@@ -72,6 +121,7 @@ export function PokemonCard({
         <h3>{pokemon.name}</h3>
       </Link>
       <Types types={pokemon.types} />
+      <PokemonMetadata pokemon={pokemon} />
       <p>
         {pokemon.base_stat_total} total stats
         {!pokemon.active && " · Unavailable"}

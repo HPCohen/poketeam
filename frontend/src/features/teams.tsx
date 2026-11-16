@@ -13,6 +13,7 @@ import { api, ApiError, type Pokemon, type Team } from "../api/client";
 import { ErrorMessage, Loading, Sprite, validateTeam } from "../shared";
 import { useSession, useTeamRefresh } from "../session";
 import { Catalog, PokemonDetail } from "./catalog";
+import { SpritePicker } from "./sprites";
 export function Home() {
   const { ready } = useSession();
   const teams = useQuery({
@@ -102,16 +103,19 @@ export function TeamEditor() {
     );
   return <Editor key={id || "new"} initial={isNew ? undefined : team.data} />;
 }
+function draftKey(name: string, members: Pokemon[]) {
+  return JSON.stringify([
+    name,
+    members.map((pokemon) => [pokemon.id, pokemon.selected_sprite || null]),
+  ]);
+}
 function Editor({ initial }: { initial?: Team }) {
   const { ready } = useSession();
   const [name, setName] = useState(initial?.name || "");
   const [members, setMembers] = useState<Pokemon[]>(initial?.pokemon || []);
   const [revision, setRevision] = useState(initial?.revision);
   const [baseline, setBaseline] = useState(
-    JSON.stringify([
-      initial?.name || "",
-      initial?.pokemon.map((p) => p.id) || [],
-    ]),
+    draftKey(initial?.name || "", initial?.pokemon || []),
   );
   const [message, setMessage] = useState("");
   const navigate = useNavigate();
@@ -120,7 +124,7 @@ function Editor({ initial }: { initial?: Team }) {
   const client = useQueryClient();
   const leaving = useRef(false);
   const base = initial ? `/teams/${initial.id}` : "/teams/new";
-  const dirty = baseline !== JSON.stringify([name, members.map((p) => p.id)]);
+  const dirty = baseline !== draftKey(name, members);
   const blocker = useBlocker(
     ({ nextLocation }) =>
       dirty &&
@@ -167,17 +171,29 @@ function Editor({ initial }: { initial?: Team }) {
         ? api.update(initial.id, {
             name: name.trim(),
             pokemon_ids: members.map((p) => p.id),
+            sprite_selections: Object.fromEntries(
+              members.map((p) => [
+                String(p.id),
+                p.selected_sprite || "front_default",
+              ]),
+            ),
             revision: revision!,
           })
         : api.create({
             name: name.trim(),
             pokemon_ids: members.map((p) => p.id),
+            sprite_selections: Object.fromEntries(
+              members.map((p) => [
+                String(p.id),
+                p.selected_sprite || "front_default",
+              ]),
+            ),
           }),
     onSuccess: (saved) => {
       setName(saved.name);
       setMembers(saved.pokemon);
       setRevision(saved.revision);
-      setBaseline(JSON.stringify([saved.name, saved.pokemon.map((p) => p.id)]));
+      setBaseline(draftKey(saved.name, saved.pokemon));
       client.setQueryData(["team", saved.id], saved);
       refresh();
       setMessage("Team saved.");
@@ -201,7 +217,7 @@ function Editor({ initial }: { initial?: Team }) {
       setName(saved.name);
       setMembers(saved.pokemon);
       setRevision(saved.revision);
-      setBaseline(JSON.stringify([saved.name, saved.pokemon.map((p) => p.id)]));
+      setBaseline(draftKey(saved.name, saved.pokemon));
       save.reset();
       setMessage("Loaded latest saved team; draft discarded.");
     },
@@ -220,6 +236,15 @@ function Editor({ initial }: { initial?: Team }) {
     }
     setMembers([...members, p]);
     setMessage(`${p.name} added to draft.`);
+  }
+  function changeSprite(id: number, selected: string | null) {
+    if (pending) return;
+    setMembers((previous) =>
+      previous.map((pokemon) =>
+        pokemon.id === id ? { ...pokemon, selected_sprite: selected } : pokemon,
+      ),
+    );
+    setMessage("");
   }
   function move(index: number, direction: number) {
     const next = [...members];
@@ -253,6 +278,13 @@ function Editor({ initial }: { initial?: Team }) {
                 <strong>{p.name}</strong>
               </Link>
               {!p.active && <p>Unavailable · retained member</p>}
+              <SpritePicker
+                name={p.name}
+                variants={p.sprite_variants || {}}
+                value={p.selected_sprite}
+                disabled={pending}
+                onChange={(selected) => changeSprite(p.id, selected)}
+              />
               <div className="actions">
                 <button
                   aria-label={`Move ${p.name} left`}
@@ -368,7 +400,14 @@ function Editor({ initial }: { initial?: Team }) {
         />
         <Route
           path="pokemon/:pokemonId"
-          element={<PokemonDetail onSelect={add} back={base} />}
+          element={
+            <PokemonDetail
+              onSelect={add}
+              back={base}
+              members={members}
+              onSpriteChange={changeSprite}
+            />
+          }
         />
       </Routes>
     </>
