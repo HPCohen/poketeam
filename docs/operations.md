@@ -63,3 +63,7 @@ Migration `0002_sprite_variants.sql` adds `pokemon.sprite_variants` and `team_me
 ## Catalog filter metadata
 
 Run migration `0003_catalog_filters.sql` before updating the API/worker, then run a normal sync to populate species introduction generation and starter/Legendary/Mythical flags. Existing rows remain readable with null generation and false flags until their incremental refresh commits. Generation/category filtering is fully populated after the complete pass. No additional upstream requests are needed: the existing species response contains generation and Legendary/Mythical status. Starter families are explicitly classified in `backend/src/model/pokeapi.rs` and should be reviewed when new main first-partner lines or Eevee evolutions appear.
+
+## Owner/session migration
+
+Migration `0004_owner_sessions.sql` separates stable owners from per-device credentials. It backfills existing hashes/timestamps before dropping `owners.token_hash`; cookie values, owner UUIDs and team ownership are preserved. **Stop the old API before applying this migration**, since its session query references the removed column. Use the normal deployment sequence: backup, stop old services, migrate, start the new API/worker and verify an existing cookie still accesses its teams. AWS backend deployment already stops existing services before migrations. Rollback to an older API requires a compatible database restore, not just changing the image. This foundation was tested in isolated databases; it is not automatically applied to the local or public deployment by code checks.

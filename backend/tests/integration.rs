@@ -1047,7 +1047,7 @@ async fn concurrent_updates_expired_owners_and_rival_failure(pool: PgPool) {
             .unwrap()
             .contains("may still exist")
     );
-    let hashes: Vec<String> = sqlx::query_scalar("SELECT token_hash FROM owners")
+    let hashes: Vec<String> = sqlx::query_scalar("SELECT token_hash FROM owner_sessions")
         .fetch_all(&h.state.pool)
         .await
         .unwrap();
@@ -1733,4 +1733,228 @@ async fn executable_commands_health_worker_restart_and_shutdown(pool: PgPool) {
         serde_json::from_str::<Value>(include_str!("../openapi.json")).unwrap()
     );
     stop(&mut server).await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn device_sessions_share_ownership_but_expire_and_revoke_independently(pool: PgPool) {
+    use poketeam::identity::sessions;
+    use sha2::{Digest, Sha256};
+    use uuid::Uuid;
+
+    let h = Harness::new(pool).await;
+    let first = h.owner().await;
+    let (_, _, identity) = h
+        .request("POST", "/api/v1/session", Some(&first), json!({}))
+        .await;
+    let owner_id: Uuid = identity["owner_id"].as_str().unwrap().parse().unwrap();
+    let team = h.team(&first, &[]).await;
+    let path = format!("/api/v1/teams/{}", team["id"].as_str().unwrap());
+
+    // Future verified provider callbacks resolve the same stable owner and call issue.
+    h.clock.advance(Duration::days(200));
+    let second = sessions::issue(&h.state, owner_id).await.unwrap();
+    assert_eq!(second.owner_id, owner_id);
+    let second_cookie = second.cookie_header(&h.state);
+    let second_cookie = second_cookie.to_str().unwrap().split(';').next().unwrap();
+    assert_ne!(first, second_cookie);
+    assert_eq!(
+        h.request("GET", &path, Some(second_cookie), json!(null))
+            .await
+            .2,
+        team
+    );
+    let raw_token = second_cookie.split_once('=').unwrap().1;
+    let stored_hash: String =
+        sqlx::query_scalar("SELECT token_hash FROM owner_sessions WHERE id=$1")
+            .bind(second.id)
+            .fetch_one(&h.state.pool)
+            .await
+            .unwrap();
+    assert_ne!(raw_token, stored_hash);
+    assert_eq!(
+        stored_hash,
+        hex::encode(Sha256::digest(raw_token.as_bytes()))
+    );
+
+    h.clock.advance(Duration::days(166));
+    assert_eq!(
+        h.request("GET", &path, Some(&first), json!(null)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        h.request("GET", &path, Some(second_cookie), json!(null))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    // The refreshed second session remains usable beyond its own original deadline.
+    h.clock.advance(Duration::days(300));
+    assert_eq!(
+        h.request("GET", &path, Some(second_cookie), json!(null))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let third = sessions::issue(&h.state, owner_id).await.unwrap();
+    assert_ne!(second.id, third.id);
+    let third_cookie = third.cookie_header(&h.state);
+    let third_cookie = third_cookie.to_str().unwrap().split(';').next().unwrap();
+
+    assert!(
+        !sessions::revoke(&h.state, Uuid::new_v4(), second.id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        h.request("GET", &path, Some(second_cookie), json!(null))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert!(
+        sessions::revoke(&h.state, owner_id, second.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !sessions::revoke(&h.state, owner_id, second.id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        h.request("GET", &path, Some(second_cookie), json!(null))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        h.request("GET", &path, Some(third_cookie), json!(null))
+            .await
+            .2,
+        team
+    );
+    let (_, headers, reused) = h
+        .request("POST", "/api/v1/session", Some(third_cookie), json!({}))
+        .await;
+    assert_eq!(reused, identity);
+    assert!(
+        headers[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .starts_with(third_cookie)
+    );
+
+    // Public anonymous entry cannot select another owner using request-body claims.
+    let (_, headers, untrusted) = h
+        .request(
+            "POST",
+            "/api/v1/session",
+            None,
+            json!({"owner_id":owner_id,"provider":"fake","subject":"claimed"}),
+        )
+        .await;
+    assert_ne!(untrusted["owner_id"], identity["owner_id"]);
+    let untrusted_cookie = headers[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    assert_eq!(
+        h.request("GET", &path, Some(untrusted_cookie), json!(null))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[sqlx::test(migrations = false)]
+async fn session_migration_preserves_legacy_cookies_and_teams(pool: PgPool) {
+    use sha2::{Digest, Sha256};
+    use uuid::Uuid;
+
+    for migration in [
+        include_str!("../migrations/0001_initial.sql"),
+        include_str!("../migrations/0002_sprite_variants.sql"),
+        include_str!("../migrations/0003_catalog_filters.sql"),
+    ] {
+        sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+    }
+    let owner_id = Uuid::new_v4();
+    let team_id = Uuid::new_v4();
+    let token = "ab".repeat(32);
+    let hash = hex::encode(Sha256::digest(token.as_bytes()));
+    let last_seen = DateTime::from_timestamp(1_800_000_000, 0).unwrap() - Duration::days(100);
+    let created = last_seen - Duration::days(10);
+    sqlx::query("INSERT INTO owners(id,token_hash,created_at,last_seen_at) VALUES($1,$2,$3,$4)")
+        .bind(owner_id)
+        .bind(&hash)
+        .bind(created)
+        .bind(last_seen)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO teams(id,owner_id,name,created_at,updated_at) VALUES($1,$2,'Legacy team',$3,$3)")
+        .bind(team_id).bind(owner_id).bind(created).execute(&pool).await.unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0004_owner_sessions.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let migrated: (
+        Uuid,
+        String,
+        DateTime<Utc>,
+        DateTime<Utc>,
+        Option<DateTime<Utc>>,
+    ) = sqlx::query_as(
+        "SELECT owner_id,token_hash,created_at,last_seen_at,revoked_at FROM owner_sessions",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(migrated, (owner_id, hash, created, last_seen, None));
+
+    let h = Harness::new(pool).await;
+    let cookie = format!("poketeam_owner={token}");
+    let (status, _, teams) = h
+        .request("GET", "/api/v1/teams", Some(&cookie), json!(null))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(teams[0]["id"], team_id.to_string());
+    assert_eq!(teams[0]["name"], "Legacy team");
+    let (_, headers, session) = h
+        .request("POST", "/api/v1/session", Some(&cookie), json!({}))
+        .await;
+    assert_eq!(session["owner_id"], owner_id.to_string());
+    assert!(
+        headers[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .starts_with(&cookie)
+    );
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM owners),(SELECT count(*) FROM owner_sessions)",
+    )
+    .fetch_one(&h.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, (1, 1));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn anonymous_registration_rolls_back_when_session_creation_fails(pool: PgPool) {
+    let h = Harness::new(pool).await;
+    sqlx::query("ALTER TABLE owner_sessions ADD CONSTRAINT reject_test_session CHECK(false)")
+        .execute(&h.state.pool)
+        .await
+        .unwrap();
+    let (status, _, _) = h.request("POST", "/api/v1/session", None, json!({})).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM owners),(SELECT count(*) FROM owner_sessions)",
+    )
+    .fetch_one(&h.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, (0, 0));
 }
