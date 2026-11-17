@@ -39,6 +39,102 @@
         }
       }
     },
+    "/api/v1/demo/pokemon/{id}": {
+      "patch": {
+        "tags": [
+          "demo"
+        ],
+        "operationId": "update_pokemon",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePokemon"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "demo_operator": []
+          }
+        ]
+      }
+    },
     "/api/v1/notifications": {
       "get": {
         "tags": [
@@ -1382,6 +1478,54 @@
           }
         }
       },
+      "StatUpdates": {
+        "type": "object",
+        "properties": {
+          "attack": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "defense": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "hp": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "special_attack": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "special_defense": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "speed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false
+      },
       "Stats": {
         "type": "object",
         "required": [
@@ -1487,6 +1631,42 @@
           }
         }
       },
+      "UpdatePokemon": {
+        "type": "object",
+        "required": [
+          "stats"
+        ],
+        "properties": {
+          "stats": {
+            "$ref": "#/components/schemas/StatUpdates"
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdateResult": {
+        "type": "object",
+        "required": [
+          "pokemon",
+          "catalog_revision"
+        ],
+        "properties": {
+          "catalog_revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "change_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Null when the submitted values already match the catalog."
+          },
+          "pokemon": {
+            "$ref": "#/components/schemas/Pokemon"
+          }
+        }
+      },
       "UpdateTeam": {
         "type": "object",
         "required": [
@@ -1523,6 +1703,10 @@
       }
     },
     "securitySchemes": {
+      "demo_operator": {
+        "type": "http",
+        "scheme": "bearer"
+      },
       "owner_cookie": {
         "type": "apiKey",
         "in": "cookie",

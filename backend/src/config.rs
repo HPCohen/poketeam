@@ -12,6 +12,7 @@ pub struct Config {
     pub allow_insecure_upstream: bool,
     pub secure_cookie: bool,
     pub scan_interval: Duration,
+    pub demo_update_token: Option<String>,
 }
 impl Config {
     pub fn from_env() -> Result<Self> {
@@ -47,6 +48,15 @@ impl Config {
             .unwrap_or_else(|_| "86400".into())
             .parse()?;
         ensure!(interval > 0, "scan interval must be positive");
+        let demo_update_token = env::var("DEMO_UPDATE_TOKEN")
+            .ok()
+            .filter(|token| !token.is_empty());
+        if let Some(token) = &demo_update_token {
+            ensure!(
+                token.len() >= 32 && token.bytes().all(|byte| byte.is_ascii_graphic()),
+                "DEMO_UPDATE_TOKEN must contain at least 32 printable non-space ASCII characters"
+            );
+        }
         Ok(Self {
             database_url: env::var("DATABASE_URL").context("DATABASE_URL is required")?,
             listen: env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".into()),
@@ -56,6 +66,7 @@ impl Config {
             allowed_hosts,
             allow_insecure_upstream,
             scan_interval: Duration::from_secs(interval),
+            demo_update_token,
         })
     }
 }

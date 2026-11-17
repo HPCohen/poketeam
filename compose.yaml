@@ -10,6 +10,7 @@ x-app: &app
     UPSTREAM_ALLOWED_HOSTS: ${UPSTREAM_ALLOWED_HOSTS:-pokeapi.co,raw.githubusercontent.com}
     ALLOW_INSECURE_UPSTREAM: ${ALLOW_INSECURE_UPSTREAM:-false}
     SCAN_INTERVAL_SECONDS: ${SCAN_INTERVAL_SECONDS:-86400}
+    DEMO_UPDATE_TOKEN: ${DEMO_UPDATE_TOKEN:-}
   depends_on:
     db:
       condition: service_healthy

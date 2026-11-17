@@ -1,6 +1,7 @@
 pub mod catalog;
 pub mod config;
 pub mod counters;
+pub mod demo;
 pub mod http;
 pub mod identity;
 pub mod model;

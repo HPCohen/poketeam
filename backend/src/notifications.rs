@@ -3,13 +3,13 @@ use crate::{
     catalog::{page_size, snapshot, validate_page},
     http::{ApiQuery, ApiResult},
     identity::owner,
-    model::{self, Pokemon},
+    model::{self, CatalogPokemon, Pokemon},
 };
 use axum::{Json, extract::State, http::HeaderMap};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use sqlx::Row;
+use serde_json::{Value, json};
+use sqlx::{PgConnection, Row};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -173,4 +173,49 @@ fn describe(name: &str, differences: &Value) -> Vec<String> {
         }
     }
     descriptions
+}
+
+pub(crate) fn differences(
+    before: Option<&CatalogPokemon>,
+    after: &CatalogPokemon,
+) -> serde_json::Result<serde_json::Map<String, Value>> {
+    let mut changes = serde_json::Map::new();
+    let after = serde_json::to_value(after)?;
+    if let Some(before) = before {
+        let before = serde_json::to_value(before)?;
+        for (key, value) in after
+            .as_object()
+            .expect("CatalogPokemon serializes as an object")
+        {
+            if before.get(key) != Some(value) {
+                changes.insert(key.clone(), json!({"before":before.get(key),"after":value}));
+            }
+        }
+    } else {
+        changes.insert("availability".into(), json!({"before":null,"after":after}));
+    }
+    Ok(changes)
+}
+
+// Caller holds the catalog-state lock. Sync changes merge per Pokémon/run;
+// NULL run IDs deliberately never match, so each manual edit is a separate event.
+pub(crate) async fn record_change(
+    conn: &mut PgConnection,
+    pokemon: i32,
+    run: Option<Uuid>,
+    now: DateTime<Utc>,
+    changes: serde_json::Map<String, Value>,
+) -> sqlx::Result<Option<i64>> {
+    if changes.is_empty() {
+        return Ok(None);
+    }
+    let changes = Value::Object(changes);
+    let updated = sqlx::query_scalar("UPDATE pokemon_changes SET differences=differences || $3 WHERE run_id=$1 AND pokemon_id=$2 RETURNING id")
+        .bind(run).bind(pokemon).bind(&changes).fetch_optional(&mut *conn).await?;
+    let id = match updated {
+        Some(id) => id,
+        None => sqlx::query_scalar("INSERT INTO pokemon_changes(pokemon_id,run_id,detected_at,differences) VALUES($1,$2,$3,$4) RETURNING id")
+            .bind(pokemon).bind(run).bind(now).bind(changes).fetch_one(conn).await?,
+    };
+    Ok(Some(id))
 }

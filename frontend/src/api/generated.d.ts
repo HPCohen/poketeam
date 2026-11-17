@@ -20,6 +20,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/demo/pokemon/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch: operations["update_pokemon"];
+        trace?: never;
+    };
     "/api/v1/notifications": {
         parameters: {
             query?: never;
@@ -305,6 +321,20 @@ export interface components {
             attacking_type: string;
             pokemon_ids: number[];
         };
+        StatUpdates: {
+            /** Format: int32 */
+            attack?: number | null;
+            /** Format: int32 */
+            defense?: number | null;
+            /** Format: int32 */
+            hp?: number | null;
+            /** Format: int32 */
+            special_attack?: number | null;
+            /** Format: int32 */
+            special_defense?: number | null;
+            /** Format: int32 */
+            speed?: number | null;
+        };
         Stats: {
             /** Format: int32 */
             attack: number;
@@ -339,6 +369,19 @@ export interface components {
             effectiveness: components["schemas"]["BTreeMap"];
             types: string[];
         };
+        UpdatePokemon: {
+            stats: components["schemas"]["StatUpdates"];
+        };
+        UpdateResult: {
+            /** Format: int64 */
+            catalog_revision: number;
+            /**
+             * Format: int64
+             * @description Null when the submitted values already match the catalog.
+             */
+            change_id?: number | null;
+            pokemon: components["schemas"]["Pokemon"];
+        };
         UpdateTeam: {
             name: string;
             pokemon_ids: number[];
@@ -372,6 +415,71 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CatalogStatus"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    update_pokemon: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdatePokemon"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateResult"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
             503: {

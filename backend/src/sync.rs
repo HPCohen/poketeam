@@ -2,6 +2,7 @@ use crate::{
     AppState,
     config::Config,
     model::{CatalogPokemon, TypeChart, from_row, pokeapi},
+    notifications::{differences, record_change},
 };
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -326,24 +327,6 @@ pub async fn run(state: &AppState, upstream: &dyn Upstream) -> Result<SyncOutcom
     conn.close().await?;
     result
 }
-fn differences(
-    before: Option<&CatalogPokemon>,
-    after: &CatalogPokemon,
-) -> Result<serde_json::Map<String, Value>> {
-    let mut changes = serde_json::Map::new();
-    let after = serde_json::to_value(after)?;
-    if let Some(before) = before {
-        let before = serde_json::to_value(before)?;
-        for (key, value) in after.as_object().context("pokemon object")? {
-            if before.get(key) != Some(value) {
-                changes.insert(key.clone(), json!({"before":before.get(key),"after":value}));
-            }
-        }
-    } else {
-        changes.insert("availability".into(), json!({"before":null,"after":after}));
-    }
-    Ok(changes)
-}
 async fn synchronize(
     state: &AppState,
     upstream: &dyn Upstream,
@@ -405,28 +388,6 @@ fn related_changes(
         })
         .cloned()
         .collect()
-}
-
-// One sync holds the advisory lock, so this update/insert cannot race another writer.
-// A chart change may already have created the event before this Pokémon is fetched.
-async fn record_change(
-    conn: &mut PgConnection,
-    pokemon: i32,
-    run: Uuid,
-    now: DateTime<Utc>,
-    changes: serde_json::Map<String, Value>,
-) -> Result<()> {
-    if changes.is_empty() {
-        return Ok(());
-    }
-    let changes = Value::Object(changes);
-    let updated = sqlx::query("UPDATE pokemon_changes SET differences=differences || $3 WHERE run_id=$1 AND pokemon_id=$2")
-        .bind(run).bind(pokemon).bind(&changes).execute(&mut *conn).await?.rows_affected();
-    if updated == 0 {
-        sqlx::query("INSERT INTO pokemon_changes(pokemon_id,run_id,detected_at,differences) VALUES($1,$2,$3,$4)")
-            .bind(pokemon).bind(run).bind(now).bind(changes).execute(conn).await?;
-    }
-    Ok(())
 }
 
 async fn update_progress(conn: &mut PgConnection, run: Uuid, processed: bool) -> Result<()> {
@@ -491,7 +452,7 @@ async fn publish_chart(
                 if !relevant.is_empty() {
                     let mut diff = serde_json::Map::new();
                     diff.insert("type_effectiveness".into(), json!(relevant));
-                    record_change(&mut tx, pokemon.id, run, now, diff).await?;
+                    record_change(&mut tx, pokemon.id, Some(run), now, diff).await?;
                 }
             }
         }
@@ -545,7 +506,7 @@ async fn write_pokemon(
         if !relevant.is_empty() {
             diff.insert("type_effectiveness".into(), json!(relevant));
         }
-        record_change(conn, pokemon.id, run, now, diff).await?;
+        record_change(conn, pokemon.id, Some(run), now, diff).await?;
     }
     if changed || revision == 0 {
         sqlx::query("UPDATE catalog_state SET revision=revision+1 WHERE singleton")
@@ -582,7 +543,7 @@ async fn finish(
         .bind(now - ChronoDuration::days(30))
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM sync_runs WHERE finished_at < $1 AND id NOT IN (SELECT run_id FROM pokemon_changes)").bind(now - ChronoDuration::days(30)).execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM sync_runs WHERE finished_at < $1 AND NOT EXISTS (SELECT 1 FROM pokemon_changes WHERE pokemon_changes.run_id=sync_runs.id)").bind(now - ChronoDuration::days(30)).execute(&mut *tx).await?;
     let (pokemon_count, change_count): (i32, i32) = sqlx::query_as("UPDATE sync_runs SET outcome='success',finished_at=$2 WHERE id=$1 RETURNING pokemon_count,change_count").bind(run).bind(now).fetch_one(&mut *tx).await?;
     tx.commit().await?;
     tracing::info!(run_id=%run,pokemon_count,change_count,"catalog synchronized");

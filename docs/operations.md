@@ -67,3 +67,28 @@ Run migration `0003_catalog_filters.sql` before updating the API/worker, then ru
 ## Owner/session migration
 
 Migration `0004_owner_sessions.sql` separates stable owners from per-device credentials. It backfills existing hashes/timestamps before dropping `owners.token_hash`; cookie values, owner UUIDs and team ownership are preserved. **Stop the old API before applying this migration**, since its session query references the removed column. Use the normal deployment sequence: backup, stop old services, migrate, start the new API/worker and verify an existing cookie still accesses its teams. AWS backend deployment already stops existing services before migrations. Rollback to an older API requires a compatible database restore, not just changing the image. This foundation was tested in isolated databases; it is not automatically applied to the local or public deployment by code checks.
+
+## Manually demonstrate a change notification
+
+Apply the normal migrations and restart the updated backend before using the endpoint. Migration `0005_manual_changes.sql` allows change events without a sync-run ID; it preserves existing events. The earlier session migration requires stopping an older API before migration. This feature is **disabled by default**, including in the current public deployment until explicitly deployed/configured.
+
+For a local demo, generate a token and keep it in the backend/operator environment:
+
+```sh
+export DEMO_UPDATE_TOKEN="$(openssl rand -hex 32)"
+# Start the updated API with this variable and its normal DATABASE_URL/PUBLIC_ORIGIN.
+```
+
+After the first full sync, open the frontend, use Get started, and save a team containing Pikachu (#25). In the terminal holding the same token, update a stat:
+
+```sh
+curl --fail-with-body --request PATCH http://127.0.0.1:3000/api/v1/demo/pokemon/25 \
+  --header 'Origin: http://127.0.0.1:5173' \
+  --header 'Content-Type: application/json' \
+  --header "Authorization: Bearer $DEMO_UPDATE_TOKEN" \
+  --data '{"stats":{"hp":50}}'
+```
+
+Use the backend's exact `PUBLIC_ORIGIN` for Origin and its actual API URL. Open Changes and choose **Refresh changes**; it also polls every 60 seconds while visible. A repeated identical edit is a no-op. Change another stat/value to generate a second event, or run a normal sync to restore authoritative stats (which also creates an alert when values differ). No alert appears for teams that do not contain that Pokémon.
+
+For Compose, the variable is passed to the backend from the shell/.env. For AWS, it remains empty by default. An operator can configure it in the root-only runtime environment and recreate the API container; normal activation preserves an existing configured value. Never place it in Vite/public frontend env variables, commit it, or paste its value into logs/SSM command history. Disable the endpoint by clearing the variable and restarting/recreating the API after the demo. The endpoint itself does not create a new sync run or move the worker's daily deadline. See [implementation and validation](../plans/manual-notification-demo.md).

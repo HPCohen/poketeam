@@ -99,6 +99,7 @@ impl Harness {
             allow_insecure_upstream: true,
             secure_cookie: false,
             scan_interval: StdDuration::from_secs(86400),
+            demo_update_token: None,
         };
         Self {
             state: AppState {
@@ -121,6 +122,17 @@ impl Harness {
         cookie: Option<&str>,
         body: Value,
     ) -> (StatusCode, axum::http::HeaderMap, Value) {
+        self.request_with_auth(method, path, cookie, body, None)
+            .await
+    }
+    async fn request_with_auth(
+        &self,
+        method: &str,
+        path: &str,
+        cookie: Option<&str>,
+        body: Value,
+        authorization: Option<&str>,
+    ) -> (StatusCode, axum::http::HeaderMap, Value) {
         let mut builder = axum::http::Request::builder()
             .method(method)
             .uri(path)
@@ -128,6 +140,9 @@ impl Harness {
             .header(header::CONTENT_TYPE, "application/json");
         if let Some(cookie) = cookie {
             builder = builder.header(header::COOKIE, cookie);
+        }
+        if let Some(authorization) = authorization {
+            builder = builder.header(header::AUTHORIZATION, authorization);
         }
         let response = http::router(self.state.clone())
             .oneshot(builder.body(Body::from(body.to_string())).unwrap())
@@ -545,7 +560,7 @@ async fn catalog_and_team_contract(pool: PgPool) {
         StatusCode::NOT_FOUND
     );
     let (_, _, doc) = h.request("GET", "/openapi.json", None, json!(null)).await;
-    assert_eq!(doc["paths"].as_object().unwrap().len(), 10);
+    assert_eq!(doc["paths"].as_object().unwrap().len(), 11);
     assert!(doc["components"]["schemas"]["CounterResult"].is_object());
 }
 
@@ -1957,4 +1972,274 @@ async fn anonymous_registration_rolls_back_when_session_creation_fails(pool: PgP
     .await
     .unwrap();
     assert_eq!(counts, (0, 0));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn manual_updates_create_real_notifications_without_rescheduling_sync(pool: PgPool) {
+    use uuid::Uuid;
+    let mut h = Harness::new(pool).await;
+    h.sync().await.unwrap();
+    let cookie = h.owner().await;
+    let first = h.team(&cookie, &[100]).await;
+    let second = h.team(&cookie, &[100]).await;
+    let other_cookie = h.owner().await;
+    let other = h.team(&other_cookie, &[100]).await;
+    let unaffected_cookie = h.owner().await;
+    h.team(&unaffected_cookie, &[2]).await;
+    let path = "/api/v1/demo/pokemon/100";
+    let (_, before_headers, before) = h
+        .request("GET", "/api/v1/pokemon/100", None, json!(null))
+        .await;
+    let old_hp = before["stats"]["hp"].as_i64().unwrap();
+    let patch = json!({"stats":{"hp":old_hp+10}});
+    assert_eq!(
+        h.request("PATCH", path, None, patch.clone()).await.0,
+        StatusCode::NOT_FOUND
+    );
+    h.state.config.demo_update_token =
+        Some("test-demo-token-0123456789abcdef0123456789abcdef".into());
+    let authorization = "Bearer test-demo-token-0123456789abcdef0123456789abcdef";
+    for supplied in [None, Some("Bearer wrong"), Some("Basic wrong")] {
+        assert_eq!(
+            h.request_with_auth("PATCH", path, Some(&cookie), patch.clone(), supplied)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    for (origin, content_type) in [
+        ("https://wrong-origin.invalid", Some("application/json")),
+        ("http://localhost:3000", None),
+    ] {
+        let mut request = axum::http::Request::builder()
+            .method("PATCH")
+            .uri(path)
+            .header(header::ORIGIN, origin)
+            .header(header::AUTHORIZATION, authorization);
+        if let Some(content_type) = content_type {
+            request = request.header(header::CONTENT_TYPE, content_type);
+        }
+        let response = http::router(h.state.clone())
+            .oneshot(request.body(Body::from(patch.to_string())).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    let (_, _, status_before) = h
+        .request("GET", "/api/v1/catalog/status", None, json!(null))
+        .await;
+    let delay_before = sync::next_delay(&h.state).await.unwrap();
+    let (status, _, updated) = h
+        .request_with_auth("PATCH", path, None, patch.clone(), Some(authorization))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["pokemon"]["stats"]["hp"], old_hp + 10);
+    assert_eq!(
+        updated["pokemon"]["base_stat_total"],
+        before["base_stat_total"].as_i64().unwrap() + 10
+    );
+    assert_eq!(
+        updated["pokemon"]["sprite_variants"],
+        before["sprite_variants"]
+    );
+    assert_eq!(
+        updated["catalog_revision"],
+        status_before["revision"].as_i64().unwrap() + 1
+    );
+    assert!(updated["change_id"].is_i64());
+    let (_, after_headers, _) = h
+        .request("GET", "/api/v1/pokemon/100", None, json!(null))
+        .await;
+    assert_ne!(before_headers[header::ETAG], after_headers[header::ETAG]);
+    let notifications = h.notifications(&cookie).await;
+    assert_eq!(notifications["total"], 1);
+    let event = &notifications["notifications"][0];
+    assert_eq!(event["id"], updated["change_id"]);
+    assert_eq!(event["differences"]["stats"]["before"], before["stats"]);
+    assert_eq!(
+        event["differences"]["stats"]["after"],
+        updated["pokemon"]["stats"]
+    );
+    assert_eq!(event["affected_team_ids"].as_array().unwrap().len(), 2);
+    for id in [&first["id"], &second["id"]] {
+        assert!(event["affected_team_ids"].as_array().unwrap().contains(id));
+    }
+    assert!(
+        event["descriptions"][0]
+            .as_str()
+            .unwrap()
+            .contains("hp changed")
+    );
+    let other_notifications = h.notifications(&other_cookie).await;
+    assert_eq!(
+        other_notifications["notifications"][0]["affected_team_ids"],
+        json!([other["id"]])
+    );
+    assert_eq!(h.notifications(&unaffected_cookie).await["total"], 0);
+    let (_, _, status_after) = h
+        .request("GET", "/api/v1/catalog/status", None, json!(null))
+        .await;
+    assert_eq!(status_after["latest_run"], status_before["latest_run"]);
+    assert_eq!(
+        status_after["last_success_at"],
+        status_before["last_success_at"]
+    );
+    assert_eq!(sync::next_delay(&h.state).await.unwrap(), delay_before);
+    let source: Option<Uuid> = sqlx::query_scalar("SELECT run_id FROM pokemon_changes WHERE id=$1")
+        .bind(updated["change_id"].as_i64().unwrap())
+        .fetch_one(&h.state.pool)
+        .await
+        .unwrap();
+    assert!(source.is_none());
+    let (_, _, noop) = h
+        .request_with_auth("PATCH", path, None, patch, Some(authorization))
+        .await;
+    assert_eq!(noop["change_id"], Value::Null);
+    assert_eq!(noop["catalog_revision"], updated["catalog_revision"]);
+    assert_eq!(h.notifications(&cookie).await["total"], 1);
+
+    // A current manual NULL source must not prevent pruning unrelated old runs.
+    let old_run = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO sync_runs(id,started_at,finished_at,outcome) VALUES($1,$2,$2,'success')",
+    )
+    .bind(old_run)
+    .bind(h.clock.now() - Duration::days(40))
+    .execute(&h.state.pool)
+    .await
+    .unwrap();
+    h.clock.advance(Duration::minutes(1));
+    h.sync().await.unwrap();
+    assert!(
+        !sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM sync_runs WHERE id=$1)")
+            .bind(old_run)
+            .fetch_one(&h.state.pool)
+            .await
+            .unwrap()
+    );
+    let notifications = h.notifications(&cookie).await;
+    assert_eq!(notifications["total"], 2);
+    assert_eq!(
+        notifications["notifications"][0]["differences"]["stats"]["before"]["hp"],
+        old_hp + 10
+    );
+    assert_eq!(
+        notifications["notifications"][0]["differences"]["stats"]["after"]["hp"],
+        old_hp
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn manual_update_validation_and_transaction_rollback(pool: PgPool) {
+    let mut h = Harness::new(pool).await;
+    h.state.config.demo_update_token =
+        Some("test-demo-token-0123456789abcdef0123456789abcdef".into());
+    let auth = Some("Bearer test-demo-token-0123456789abcdef0123456789abcdef");
+    let path = "/api/v1/demo/pokemon/100";
+    assert_eq!(
+        h.request_with_auth("PATCH", path, None, json!({"stats":{"hp":50}}), auth)
+            .await
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    h.sync().await.unwrap();
+    for stats in [
+        json!({}),
+        json!({"hp":null}),
+        json!({"hp":0}),
+        json!({"speed":1001}),
+        json!({"attack":-1}),
+    ] {
+        assert_eq!(
+            h.request_with_auth("PATCH", path, None, json!({"stats":stats}), auth)
+                .await
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    for body in [
+        json!({}),
+        json!({"stats":{"hp":"x"}}),
+        json!({"stats":{"typo":4}}),
+        json!({"stats":{"hp":42},"active":false}),
+    ] {
+        assert_eq!(
+            h.request_with_auth("PATCH", path, None, body, auth).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        h.request_with_auth(
+            "PATCH",
+            "/api/v1/demo/pokemon/999999",
+            None,
+            json!({"stats":{"hp":50}}),
+            auth
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let (_, _, before) = h
+        .request("GET", "/api/v1/pokemon/100", None, json!(null))
+        .await;
+    let (_, _, status_before) = h
+        .request("GET", "/api/v1/catalog/status", None, json!(null))
+        .await;
+    sqlx::query("ALTER TABLE pokemon_changes ADD CONSTRAINT reject_manual_test_change CHECK(run_id IS NOT NULL)")
+        .execute(&h.state.pool).await.unwrap();
+    assert_eq!(
+        h.request_with_auth(
+            "PATCH",
+            path,
+            None,
+            json!({"stats":{"hp":999,"speed":1000}}),
+            auth
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let (_, _, after) = h
+        .request("GET", "/api/v1/pokemon/100", None, json!(null))
+        .await;
+    let (_, _, status_after) = h
+        .request("GET", "/api/v1/catalog/status", None, json!(null))
+        .await;
+    assert_eq!(before, after);
+    assert_eq!(status_before, status_after);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM pokemon_changes")
+            .fetch_one(&h.state.pool)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn demo_token_startup_rejects_weak_or_malformed_configuration() {
+    for token in [
+        "short".to_owned(),
+        " ".repeat(32),
+        format!("{}\n", "a".repeat(32)),
+    ] {
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_poketeam"))
+            .arg("migrate")
+            .env(
+                "DATABASE_URL",
+                "postgres://unused:unused@127.0.0.1:1/unused",
+            )
+            .env("PUBLIC_ORIGIN", "http://localhost:3000")
+            .env("UPSTREAM_URL", "https://pokeapi.co/api/v2/")
+            .env("DEMO_UPDATE_TOKEN", token)
+            .output()
+            .await
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("DEMO_UPDATE_TOKEN must contain at least 32")
+        );
+    }
 }

@@ -39,3 +39,5 @@ Run `cd frontend && npm ci && npm run dev`, then open **http://127.0.0.1:5173**.
 Sprite selectors expose all non-null versions supplied for each catalog Pokémon, including shiny, game-version, artwork and animated images. Choices are saved per team member. Additional variants load from upstream URLs on demand; the default sprite remains cached locally.
 
 Search combines multiple types (All/Any), introduction generation and separate Starter families, Legendary or Mythical groups. Starter results include full evolution families, including Pikachu and Eevee relatives. The same filters are available while building a team.
+
+For an operator-controlled notification demonstration, the optional stat-update endpoint is documented in [operations](docs/operations.md#manually-demonstrate-a-change-notification). It is disabled by default and uses a separate server-only token.

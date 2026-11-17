@@ -6,6 +6,7 @@ x-app: &app
     PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?PUBLIC_ORIGIN is required}
     LISTEN_ADDR: 0.0.0.0:3000
     RUST_LOG: poketeam=info,tower_http=info
+    DEMO_UPDATE_TOKEN: ${DEMO_UPDATE_TOKEN:-}
   mem_limit: 256m
   logging: &logging
     driver: json-file

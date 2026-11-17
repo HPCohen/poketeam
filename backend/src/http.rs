@@ -5,6 +5,7 @@ use crate::{
         unavailable,
     },
     counters::{CounterResult, Mode},
+    demo::{self, StatUpdates, UpdatePokemon, UpdateResult},
     identity::{self, Session, cookie, token},
     model::{Pokemon, Stats},
     notifications::{self, Notification, NotificationPage},
@@ -117,6 +118,10 @@ pub fn router(state: AppState) -> Router {
         .route("/openapi.json", get(openapi))
         .route("/api/v1/session", post(identity::session))
         .route("/api/v1/pokemon", get(catalog::catalog))
+        .route(
+            "/api/v1/demo/pokemon/{id}",
+            axum::routing::patch(demo::update_pokemon),
+        )
         .route("/api/v1/pokemon/{id}", get(catalog::pokemon))
         .route("/api/v1/types", get(catalog::types))
         .route("/api/v1/sprites/{hash}", get(catalog::sprite))
@@ -230,6 +235,14 @@ impl utoipa::Modify for CookieSecurity {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         if let Some(components) = openapi.components.as_mut() {
             components.add_security_scheme(
+                "demo_operator",
+                utoipa::openapi::security::SecurityScheme::Http(
+                    utoipa::openapi::security::Http::new(
+                        utoipa::openapi::security::HttpAuthScheme::Bearer,
+                    ),
+                ),
+            );
+            components.add_security_scheme(
                 "owner_cookie",
                 utoipa::openapi::security::SecurityScheme::ApiKey(
                     utoipa::openapi::security::ApiKey::Cookie(
@@ -241,7 +254,7 @@ impl utoipa::Modify for CookieSecurity {
     }
 }
 #[derive(OpenApi)]
-#[openapi(info(title="Poketeam API",version="1.0.0",description="Same-origin JSON REST API. All mutations require Origin matching PUBLIC_ORIGIN and Content-Type application/json. Establish identity with POST /api/v1/session and send the HttpOnly cookie on subsequent requests. DELETE accepts {}. Errors use {code,message,details?}. Counter search uses deterministic heuristics, not battle simulation."),paths(identity::session,catalog::catalog,catalog::pokemon,catalog::types,catalog::sprite,catalog::status,teams::teams,teams::create_team,teams::team,teams::update_team,teams::delete_team,teams::counter_team,notifications::notifications),components(schemas(Stats,Pokemon,Session,ErrorBody,CatalogPage,TypeMatch,Category,TypeResponse,CatalogStatus,RefreshRun,Team,CreateTeam,UpdateTeam,CounterRequest,CounterResult,Mode,Notification,NotificationPage)),modifiers(&CookieSecurity))]
+#[openapi(info(title="Poketeam API",version="1.0.0",description="Same-origin JSON REST API. All mutations require Origin matching PUBLIC_ORIGIN and Content-Type application/json. Establish identity with POST /api/v1/session and send the HttpOnly cookie on subsequent requests. DELETE accepts {}. Errors use {code,message,details?}. Counter search uses deterministic heuristics, not battle simulation."),paths(identity::session,demo::update_pokemon,catalog::catalog,catalog::pokemon,catalog::types,catalog::sprite,catalog::status,teams::teams,teams::create_team,teams::team,teams::update_team,teams::delete_team,teams::counter_team,notifications::notifications),components(schemas(Stats,Pokemon,Session,StatUpdates,UpdatePokemon,UpdateResult,ErrorBody,CatalogPage,TypeMatch,Category,TypeResponse,CatalogStatus,RefreshRun,Team,CreateTeam,UpdateTeam,CounterRequest,CounterResult,Mode,Notification,NotificationPage)),modifiers(&CookieSecurity))]
 pub struct ApiDoc;
 async fn openapi() -> Json<utoipa::openapi::OpenApi> {
     Json(ApiDoc::openapi())
