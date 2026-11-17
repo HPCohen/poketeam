@@ -1,43 +1,43 @@
 # Poketeam
 
-A Rust/Axum REST API and periodic worker backed by PostgreSQL. Both commands use the same image. The catalog contains species’ default varieties across all generations; API requests read only local data. The React/TypeScript frontend lives in `frontend/`; production deployment remains a separate action.
+A Pokémon team builder with counter-team recommendations and alerts for catalog changes affecting saved teams. Built as an interview case study, the goal was a working, enjoyable first version with room for extension.
 
-```sh
-docker compose up -d db
-docker compose build
-docker compose run --rm migrate
-docker compose up -d api worker
-# Ready once the worker saves the type chart and its first Pokémon:
-curl http://localhost:3000/health/ready
+[Live app](https://d2d00yusoq9i0z.cloudfront.net) · [Setup and project guide](docs/project-guide.md) · [API](docs/api.md) · [Operations](docs/operations.md)
+
+## Design priorities
+
+**Maintainability and time drove the project.** The aim was to deliver a useful experience while establishing a stable foundation for later features. Scope and infrastructure stayed small; extension points were added where they would preserve that foundation.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Browser[React / TypeScript] --> Edge[CloudFront HTTPS]
+    Edge --> Web
+    subgraph Host["Single EC2 host · us-east-2"]
+        Web[nginx / static frontend] --> API[Rust / Axum API]
+        API --> DB[(PostgreSQL)]
+        Worker[Sync worker] --> DB
+    end
+    Worker --> Upstream[PokéAPI]
 ```
 
-**Design.** Explicit SQL, a single crate, and no broker or distributed cache keep the architecture small. Each sync follows paginated resource lists and fetches details sequentially with reqwest’s JSON decoder. It saves the type chart first, then commits each Pokémon with its sprite and change event before fetching the next. An advisory lock prevents overlapping scans. Failures retain already committed records; missing Pokémon are marked unavailable only after a complete scan; the worker retries after 15 minutes and normally refreshes 24 hours after success. PostgreSQL stores small sprites so each image and Pokémon row commit together.
+The API and worker run as separate processes from one Rust codebase and container image. Browser requests read the local catalog rather than calling PokéAPI.
 
-**Ownership and teams.** `POST /api/v1/session` with `{}` establishes a persistent anonymous HttpOnly cookie. Same-origin JSON mutations require an exact `Origin` match. HTTPS origins enable Secure cookies. Teams have zero to six distinct, ordered members, per-member sprite choices, and optimistic revisions; ownership is enforced in SQL. Clearing the cookie loses access. Stable owners now support independent device-session records, ready for future trusted provider callbacks; provider login/linking and cross-device recovery remain deferred. See [the auth foundation](plans/auth-provider-foundation.md).
+## Decisions and tradeoffs
 
-**Counter teams.** Power mode prioritizes coverage, then total base stats, then matchup score. Rival mode preserves total stats within ±5% and prioritizes coverage and matchup score. Both are deterministic greedy/local-search heuristics capped at ten improvement passes. Own-type attacks multiply effectiveness across defender types; shared weaknesses incur a penalty. Moves, abilities, items, levels, and battle outcomes are outside the model. Rival search failure means the heuristic found no qualifying seed, not that none exists.
+| Element | Reasoning | Accepted cost or limitation |
+| --- | --- | --- |
+| **Rust backend** | Resource-efficient deployment as a straightforward binary on small hardware. Compiler and type-system feedback also speed validation of AI-assisted changes. | Explicit, sometimes verbose code increases review volume. For this small application, compiler confidence was worth that overhead. |
+| **React / TypeScript** | A familiar, commonly encountered stack. TypeScript catches certain classes of issues before runtime, following the same preference for early feedback. | Its guarantees are less strict than Rust's; types alone cannot establish that the application works. |
+| **PostgreSQL / explicit SQL** | Several databases would have worked; PostgreSQL offered simple setup and room to grow. SQL is familiar across languages, avoids an ORM-specific learning curve, and can be debugged independently. | Queries, mappings, migrations, and database operations remain explicit maintenance work. |
+| **Local catalog / incremental sync** | API errors and timeouts motivated a simple fetch loop that saves each Pokémon as it arrives. A usable partial product mattered more than optimizing I/O at this scale. | A refresh can leave mixed-age data. Daily refresh is a practical default for infrequently changing data, not a freshness guarantee. |
+| **Counter recommendations** | The open-ended prompt left room for fun: type advantage and a stat-balanced Rival mode inspired by an opponent at a similar power level. | Moves, abilities, and levels were deliberately excluded to keep implementation simple. Recommendations are not battle predictions. |
+| **Identity / extension** | Anonymous sessions got the app working without an external identity provider. Stable owners and separate device sessions leave a boundary for adding providers later. | Provider login, account linking, and cross-device sign-in remain deferred. |
+| **Sprite loading** | Keep default sprites available and load cosmetic alternatives only when selected, avoiding unnecessary image imports after early sync-performance issues. | Additional images depend on their upstream host; the cached default provides a fallback. |
+| **Hosting** | One EC2 host was chosen for simplicity and cost, with standard CloudFront providing HTTPS. | A single failure domain and deployment downtime; account credits and usage limits still apply. |
+| **Validation** | Prioritize integration and smoke tests, especially the frontend/backend connection, to establish that connected workflows function. | Compiler checks and fixtures cannot establish production configuration; live deployment needs its own checks. |
 
-**Change alerts.** Initial import is silent. Consumed fields, availability, sprite source/content, and relevant type-chart relationships produce structured events with detection timestamps. Notifications deduplicate events across the owner’s current teams for an inclusive seven-day window. History is pruned after 30 days during successful scans. Existing teams retain unavailable members; new selections and counters use active Pokémon.
+Local caching and a modest refresh frequency also respect [PokéAPI's fair-use guidance](https://pokeapi.co/docs/v2#fairuse) for a shared public resource.
 
-**Verification.** Install Rust 1.99.1, start the database above, then run:
-
-```sh
-export DATABASE_URL=postgres://poketeam:poketeam@localhost:5432/poketeam
-cargo test --locked --manifest-path backend/Cargo.toml
-scripts/demo.sh             # Local mock baseline → stat/sprite change → alert → dedup → expiry
-scripts/check-openapi.sh
-```
-
-Tests use isolated SQLx databases and a local HTTP fixture; CI never calls live PokéAPI. CI also checks formatting, Clippy, OpenAPI drift, and container builds. See [captured demo](docs/demo.md), [API/TypeScript integration](docs/api.md), [operations and backup/restore](docs/operations.md), [approved plan](plans/approved-plan.md), and [implementation/verification record](plans/implementation.md). Configuration is documented in [.env.example](.env.example); Compose credentials are for local development.
-
-For AWS hosting, see [AWS CLI deployment scripts](aws/README.md) for a single-host deployment, Free Tier checks, HTTPS, backups, future frontend uploads, and teardown.
-
-## Frontend
-
-Run `cd frontend && npm ci && npm run dev`, then open **http://127.0.0.1:5173**. Set the backend’s `PUBLIC_ORIGIN=http://127.0.0.1:5173` to match that exact browser origin. Vite proxies API requests to port 3000. `npm run build` produces `frontend/dist` for the existing AWS deployment scripts. See [frontend setup and checks](frontend/README.md) and [implementation record](plans/frontend.md).
-
-Sprite selectors expose all non-null versions supplied for each catalog Pokémon, including shiny, game-version, artwork and animated images. Choices are saved per team member. Additional variants load from upstream URLs on demand; the default sprite remains cached locally.
-
-Search combines multiple types (All/Any), introduction generation and separate Starter families, Legendary or Mythical groups. Starter results include full evolution families, including Pikachu and Eevee relatives. The same filters are available while building a team.
-
-For an operator-controlled notification demonstration, the optional stat-update endpoint is documented in [operations](docs/operations.md#manually-demonstrate-a-change-notification). It is disabled by default and uses a separate server-only token.
+Setup, feature behavior, verification commands, and deeper references are in the [project guide](docs/project-guide.md). Implementation and deployment records are in [plans/](plans/); the live deployment can lag the repository.
