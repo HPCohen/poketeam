@@ -1750,6 +1750,39 @@ async fn executable_commands_health_worker_restart_and_shutdown(pool: PgPool) {
     stop(&mut server).await;
 }
 
+#[cfg(unix)]
+#[sqlx::test(migrations = "./migrations")]
+async fn worker_shutdown_interrupts_blocked_scheduling(pool: PgPool) {
+    let h = Harness::new(pool).await;
+    let mut tx = h.state.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE sync_runs IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let mut worker = command(&h, "worker").spawn().unwrap();
+    // Observe the blocked query instead of guessing when the worker has started.
+    tokio::time::timeout(StdDuration::from_secs(3), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'
+                 AND query LIKE 'SELECT outcome,finished_at FROM sync_runs%')",
+            )
+            .fetch_one(&h.state.pool)
+            .await
+            .unwrap();
+            if blocked {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("worker did not reach the blocked scheduling query");
+    stop(&mut worker).await;
+    tx.rollback().await.unwrap();
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn device_sessions_share_ownership_but_expire_and_revoke_independently(pool: PgPool) {
     use poketeam::identity::sessions;

@@ -277,7 +277,10 @@ test("keyboard navigation, public exploration and staged add", async ({
   await expect(page.getByRole("button", { name: "Save team" })).toBeDisabled();
   await page.getByRole("button", { name: "Get started" }).click();
   await page.getByLabel("Team name").fill("Keyboard team");
-  await page.getByRole("button", { name: "Save team" }).focus();
+  const save = page.getByRole("button", { name: "Save team" });
+  await expect(save).toBeEnabled();
+  await save.focus();
+  await expect(save).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(page).toHaveURL(/\/teams\/team-1$/);
 });

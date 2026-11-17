@@ -555,10 +555,13 @@ async fn finish(
 }
 
 pub async fn next_delay(state: &AppState) -> Result<Duration> {
+    // A cancelled query must close its connection rather than block pool shutdown.
+    let mut conn = PgConnection::connect(&state.config.database_url).await?;
     let latest =
         sqlx::query("SELECT outcome,finished_at FROM sync_runs ORDER BY sequence DESC LIMIT 1")
-            .fetch_optional(&state.pool)
+            .fetch_optional(&mut conn)
             .await?;
+    conn.close().await?;
     if let Some(row) = latest {
         let outcome: String = row.try_get("outcome")?;
         if outcome == "running" {
@@ -580,22 +583,25 @@ pub async fn next_delay(state: &AppState) -> Result<Duration> {
     }
 }
 pub async fn worker(state: AppState, upstream: &dyn Upstream) -> Result<()> {
-    loop {
-        let delay = next_delay(&state).await?;
-        tokio::select! { _=crate::http::shutdown_signal()=>return Ok(()), _=tokio::time::sleep(delay)=>{} }
-        // Cancellation rolls back the current transaction and retains earlier committed records.
-        tokio::select! {
-            _=crate::http::shutdown_signal()=>return Ok(()),
-            result=run(&state,upstream)=>match result {
-                Ok(outcome) if outcome.skipped=> {
-                    tokio::select! { _=crate::http::shutdown_signal()=>return Ok(()), _=tokio::time::sleep(Duration::from_secs(60))=>{} }
-                },
-                Err(error)=> {
-                    tracing::error!(error=%error,"worker scan failed");
-                    tokio::select! { _=crate::http::shutdown_signal()=>return Ok(()), _=tokio::time::sleep(Duration::from_secs(900))=>{} }
-                },
-                _=>{}
+    // Keep one signal listener alive across scheduling, scans, and retry delays.
+    // Cancellation rolls back the current transaction and retains earlier committed records.
+    tokio::select! {
+        _ = crate::http::shutdown_signal() => Ok(()),
+        result = async {
+            loop {
+                let delay = next_delay(&state).await?;
+                tokio::time::sleep(delay).await;
+                match run(&state, upstream).await {
+                    Ok(outcome) if outcome.skipped => {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                    }
+                    Err(error) => {
+                        tracing::error!(error=%error,"worker scan failed");
+                        tokio::time::sleep(Duration::from_secs(900)).await;
+                    }
+                    _ => {}
+                }
             }
-        }
+        } => result,
     }
 }
